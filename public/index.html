@@ -21,10 +21,11 @@
 <main class="screen" data-screen="name" hidden>
   <div class="top">
     <div class="brand"><span class="logo"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>Check-in</div>
-    <span class="step">Step 1 of 2</span>
+    <span class="step">Step 1 of 3</span>
   </div>
   <h1>What is your name?</h1>
-  <p class="lede">You only do this once. After that, you just scan.</p>
+  <p class="lede">Then a selfie, then scan the code on the screen. Everyone does all three, every time.</p>
+  <p class="lede" id="linkHint" hidden style="margin-top:12px;font-weight:700;color:#0f172a">You opened this by scanning with your camera app. Do the steps below first. The last step scans the screen again.</p>
   <form id="nameForm" novalidate>
     <label class="field" for="name">Full name</label>
     <input id="name" type="text" autocomplete="name" autocapitalize="words" maxlength="80" placeholder="As on your student ID" enterkeyhint="next">
@@ -40,7 +41,7 @@
 <main class="screen" data-screen="selfie" hidden>
   <div class="top">
     <div class="brand"><span class="logo"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>Check-in</div>
-    <span class="step">Step 2 of 2</span>
+    <span class="step">Step 2 of 3</span>
   </div>
   <h1>Now a quick selfie</h1>
   <p class="lede">Look at the front camera and keep your face in the circle.</p>
@@ -53,9 +54,9 @@
   <div class="spacer"></div>
   <button class="btn" id="shoot" type="button" disabled>
     <svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l1.5-2h7L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
-    <span>Take selfie &amp; join</span>
+    <span>Take selfie</span>
   </button>
-  <p class="note">Only a lecturer whose code you scan can see your name and photo. You can delete them after checking in.</p>
+  <p class="note">Only the lecturer whose code you scan sees your name and photo. Nothing is saved on this phone.</p>
 </main>
 
 <!-- 3 · scan -->
@@ -82,18 +83,18 @@
     <div class="when" id="doneTime"></div>
   </div>
   <div class="foot">
-    <div>You can close this page.</div>
-    <button class="linkbtn" id="forget" type="button">Delete my name and selfie</button>
+    <button class="btn" id="another" type="button" style="background:#eef1f9;color:#0f172a;margin-bottom:14px">Check in someone else</button>
+    <div>Or just close this page.</div>
   </div>
 </main>
 
 <!-- no session / problems -->
 <main class="screen" data-screen="wait" hidden>
   <div class="center">
-    <h1 style="margin-top:0" id="waitTitle">No connection</h1>
+    <h1 style="margin-top:0" id="waitTitle">Session ended</h1>
     <p class="lede" id="waitText"></p>
   </div>
-  <button class="btn" id="waitRetry" type="button">Try again</button>
+  <button class="btn" id="waitRetry" type="button">Start over</button>
 </main>
 </body>
 </html>

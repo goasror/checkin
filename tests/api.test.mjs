@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
+import { PDFDocument } from 'pdf-lib';
 import { handle } from '../netlify/functions/api.mjs';
 
 // Minimal in-memory stand-in for a Netlify Blobs store.
@@ -22,12 +24,15 @@ class MemStore {
   }
 }
 
-const PHOTO = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ==';
+// A real (tiny) JPEG, so the PDF test can embed it.
+const JPEG_B64 =
+  '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAAAP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==';
+const PHOTO = `data:image/jpeg;base64,${JPEG_B64}`;
 const KEY_A = 'A'.repeat(32);
 const KEY_B = 'B'.repeat(32);
 
 function setup() {
-  const db = { students: new MemStore(), sessions: new MemStore(), checkins: new MemStore() };
+  const db = { sessions: new MemStore(), checkins: new MemStore() };
   const clock = { t: Date.UTC(2026, 9, 26, 9, 0, 0) };
   const call = (method, path, body, headers = {}) =>
     handle(
@@ -39,13 +44,13 @@ function setup() {
       { db, now: () => clock.t },
     );
   const as = (key) => (method, path, body) => call(method, path, body, { 'x-host-key': key });
-  const enroll = async (name) => (await (await call('POST', '/api/enroll', { name, photo: PHOTO })).json()).id;
   const startAs = async (hostCall, title) => {
     await hostCall('POST', '/api/host/start', { title });
     const s = await (await hostCall('GET', '/api/host/state')).json();
     return { ...s, code: `${s.sessionId}.${s.token}` };
   };
-  return { call, hostA: as(KEY_A), hostB: as(KEY_B), enroll, startAs, clock };
+  const checkin = (name, code, photo = PHOTO) => call('POST', '/api/checkin', { name, photo, code });
+  return { call, hostA: as(KEY_A), hostB: as(KEY_B), startAs, checkin, clock };
 }
 
 test('host endpoints need a well-formed key, any key works', async () => {
@@ -55,126 +60,105 @@ test('host endpoints need a well-formed key, any key works', async () => {
   assert.equal((await hostA('GET', '/api/host/state')).status, 200); // no sign-up needed
 });
 
-test('enrolling validates input and allows the same name for different people', async () => {
-  const { call } = setup();
-  assert.equal((await call('POST', '/api/enroll', { name: 'A', photo: PHOTO })).status, 400);
-  assert.equal((await call('POST', '/api/enroll', { name: 'Ada Lovelace', photo: 'data:text/html;base64,AAAA' })).status, 400);
-  assert.equal((await call('POST', '/api/enroll', { name: 'John Smith', photo: PHOTO })).status, 200);
-  assert.equal((await call('POST', '/api/enroll', { name: 'John Smith', photo: PHOTO })).status, 200);
+test('check-in validates name, photo and code', async () => {
+  const { hostA, startAs, checkin, clock } = setup();
+  const s = await startAs(hostA);
+  assert.equal((await checkin('A', s.code)).status, 400);
+  assert.equal((await checkin('Ada Lovelace', s.code, 'data:text/html;base64,AAAA')).status, 400);
+  assert.equal((await checkin('Ada Lovelace', `${s.sessionId}.bogus`)).status, 410);
+  assert.equal((await checkin('Ada Lovelace', 'nope.nope')).status, 410);
+  assert.equal((await checkin('Ada Lovelace', 'garbage')).status, 410);
+  clock.t += 3000;
+  assert.equal((await checkin('Ada Lovelace', s.code)).status, 200); // current + previous window
+  clock.t += 25000;
+  const late = await checkin('Alan Turing', s.code); // a screenshot from half a minute ago
+  assert.equal(late.status, 410);
+  assert.equal((await late.json()).error, 'expired');
 });
 
-test('rotating code, one check-in per student, CSV and history for one host', async () => {
-  const { call, hostA, enroll, startAs, clock } = setup();
-  const id = await enroll('Ada Lovelace');
-  const id2 = await enroll('=cmd|calc');
-  const s = await startAs(hostA, 'Physics 101');
-  assert.equal(s.count, 0);
+test('nothing is remembered: each check-in brings its own name and photo', async () => {
+  const { hostA, startAs, checkin, clock } = setup();
+  const s = await startAs(hostA);
+  // one phone passed around: three different people, no accounts or enrollment involved
+  for (const name of ['Ada Lovelace', 'Alan Turing', 'Grace Hopper']) {
+    assert.equal((await checkin(name, s.code)).status, 200);
+    clock.t += 1000;
+  }
+  const state = await (await hostA('GET', '/api/host/state')).json();
+  assert.equal(state.count, 3);
+  assert.deepEqual(state.latest.map((p) => p.name), ['Grace Hopper', 'Alan Turing', 'Ada Lovelace']);
+  assert.ok(state.latest.every((p) => p.photo && !p.dup));
+});
 
-  assert.equal((await call('POST', '/api/checkin', { id, code: `${s.sessionId}.bogus` })).status, 410);
-  assert.equal((await call('POST', '/api/checkin', { id: 'unknown', code: s.code })).status, 404);
-  assert.equal((await call('POST', '/api/checkin', { id, code: 'nope.nope' })).status, 410);
-
-  clock.t += 3000;
-  const first = await (await call('POST', '/api/checkin', { id, code: s.code })).json();
-  assert.equal(first.already, false);
-  clock.t += 4000; // still within the current + previous window
-  const again = await (await call('POST', '/api/checkin', { id, code: s.code })).json();
-  assert.equal(again.already, true);
-  assert.equal(again.time, first.time);
-
-  clock.t += 20000; // that code is now two windows old
-  assert.equal((await call('POST', '/api/checkin', { id: id2, code: s.code })).status, 410);
-  const s2 = await startAs(hostA);
-  assert.equal(s2.sessionId, s.sessionId); // starting again returns the live session
-  assert.equal((await call('POST', '/api/checkin', { id: id2, code: s2.code })).status, 200);
-
-  let state = await (await hostA('GET', '/api/host/state')).json();
-  assert.equal(state.count, 2);
-  assert.equal(state.title, 'Physics 101');
-  assert.equal(state.latest[0].name, '=cmd|calc'); // newest first
-  assert.ok(state.latest[0].photo);
-  state = await (await hostA('GET', `/api/host/state?have=${id2}`)).json();
-  assert.equal(state.latest[0].photo, undefined); // client already holds this photo
-
-  const ended = await (await hostA('POST', '/api/host/end')).json();
-  assert.equal(ended.count, 2);
-  assert.equal((await (await hostA('GET', '/api/host/state')).json()).active, false);
-  assert.equal((await call('POST', '/api/checkin', { id, code: s2.code })).status, 410); // session over
-
-  const csv = await hostA('GET', `/api/host/csv?s=${ended.sessionId}&tz=Europe/Berlin`);
-  assert.match(csv.headers.get('content-disposition'), /attendance-2026-10-26-Physics-101\.csv/);
-  const text = await csv.text();
-  assert.match(text, /"Ada Lovelace","2026-10-26 10:00:03"/); // 09:00 UTC = 10:00 Berlin (CET, DST ended 25 Oct)
-  assert.match(text, /"'=cmd\|calc"/); // formula neutralised
-
-  const hist = await (await hostA('GET', '/api/host/sessions')).json();
-  assert.equal(hist.sessions.length, 1);
-  assert.equal(hist.sessions[0].count, 2);
+test('the same name twice is flagged, not blocked, and counted once', async () => {
+  const { hostA, startAs, checkin, clock } = setup();
+  const s = await startAs(hostA);
+  const first = await (await checkin('John Smith', s.code)).json();
+  clock.t += 1000;
+  const second = await (await checkin('  john   SMITH ', s.code)).json();
+  assert.equal(first.dup, false);
+  assert.equal(second.dup, true);
+  const state = await (await hostA('GET', '/api/host/state')).json();
+  assert.equal(state.count, 1); // one person...
+  assert.equal(state.latest.length, 2); // ...two check-ins to compare
+  assert.equal(state.latest[0].dup, true);
+  const again = await (await hostA('GET', `/api/host/state?have=${state.latest[0].id}`)).json();
+  assert.equal(again.latest[0].photo, undefined); // the host already holds this photo
 });
 
 test('hosts run side by side: lists, codes and downloads stay separate', async () => {
-  const { call, hostA, hostB, enroll, startAs } = setup();
-  const ada = await enroll('Ada Lovelace');
-  const alan = await enroll('Alan Turing');
+  const { hostA, hostB, startAs, checkin } = setup();
   const a = await startAs(hostA, 'Hall A');
   const b = await startAs(hostB, 'Hall B');
   assert.notEqual(a.sessionId, b.sessionId);
-
-  assert.equal((await call('POST', '/api/checkin', { id: ada, code: a.code })).status, 200);
-  assert.equal((await call('POST', '/api/checkin', { id: alan, code: b.code })).status, 200);
-  // Hall A's token does not unlock Hall B's session.
-  assert.equal((await call('POST', '/api/checkin', { id: alan, code: `${b.sessionId}.${a.token}` })).status, 410);
+  assert.equal((await checkin('Ada Lovelace', a.code)).status, 200);
+  assert.equal((await checkin('Alan Turing', b.code)).status, 200);
+  assert.equal((await checkin('Alan Turing', `${b.sessionId}.${a.token}`)).status, 410); // A's token is useless in B
 
   const stateA = await (await hostA('GET', '/api/host/state')).json();
   const stateB = await (await hostB('GET', '/api/host/state')).json();
   assert.deepEqual(stateA.latest.map((p) => p.name), ['Ada Lovelace']);
   assert.deepEqual(stateB.latest.map((p) => p.name), ['Alan Turing']);
 
-  // Host A cannot end, list or download Host B's session.
   const endedB = await (await hostB('POST', '/api/host/end')).json();
-  assert.equal((await hostA('GET', `/api/host/csv?s=${endedB.sessionId}`)).status, 404);
+  assert.equal((await hostA('GET', `/api/host/pdf?s=${endedB.sessionId}`)).status, 404); // not A's session
   assert.equal((await (await hostA('GET', '/api/host/sessions')).json()).sessions.length, 0);
-  assert.equal((await hostB('GET', `/api/host/csv?s=${endedB.sessionId}`)).status, 200);
+  assert.equal((await hostB('GET', `/api/host/pdf?s=${endedB.sessionId}`)).status, 200);
   assert.equal((await (await hostA('GET', '/api/host/state')).json()).active, true); // A is unaffected
 });
 
-test('two people cannot check in under the same name in one session', async () => {
-  const { call, hostA, enroll, startAs } = setup();
-  const one = await enroll('John Smith');
-  const two = await enroll('  john   SMITH ');
-  const s = await startAs(hostA);
-  assert.equal((await call('POST', '/api/checkin', { id: one, code: s.code })).status, 200);
-  const res = await call('POST', '/api/checkin', { id: two, code: s.code });
-  assert.equal(res.status, 409);
-  assert.equal((await res.json()).error, 'name_in_use');
-  // The first person can still re-scan freely.
-  assert.equal((await (await call('POST', '/api/checkin', { id: one, code: s.code })).json()).already, true);
-});
-
-test('forget deletes a student', async () => {
-  const { call, hostA, enroll, startAs } = setup();
-  const id = await enroll('Ada Lovelace');
-  const s = await startAs(hostA);
-  assert.equal((await call('POST', '/api/forget', { id })).status, 200);
-  assert.equal((await call('POST', '/api/checkin', { id, code: s.code })).status, 404);
-});
-
-test('report page embeds photos, escapes names, and is private to its host', async () => {
-  const { call, hostA, hostB, enroll, startAs } = setup();
-  const id = await enroll('<b>Bob</b> & "Co"');
-  const s = await startAs(hostA, 'Hall <1>');
-  await call('POST', '/api/checkin', { id, code: s.code });
+test('ending a session closes it and the PDF report is produced', async () => {
+  const { call, hostA, startAs, checkin } = setup();
+  const s = await startAs(hostA, 'Физика 101');
+  await checkin('Анна Иванова', s.code);
+  await checkin('Ada Lovelace', s.code);
+  await checkin('Ada Lovelace', s.code); // duplicate on purpose
   const ended = await (await hostA('POST', '/api/host/end')).json();
+  assert.equal(ended.count, 2);
+  assert.equal((await (await hostA('GET', '/api/host/state')).json()).active, false);
+  assert.equal((await checkin('Alan Turing', s.code)).status, 410); // session over
 
-  const res = await hostA('GET', `/api/host/report?s=${ended.sessionId}&tz=UTC`);
+  const res = await hostA('GET', `/api/host/pdf?s=${ended.sessionId}&tz=Europe/Berlin`);
   assert.equal(res.status, 200);
-  assert.match(res.headers.get('content-type'), /text\/html/);
-  assert.match(res.headers.get('content-disposition'), /attendance-2026-10-26-Hall-1\.html/);
-  const html = await res.text();
-  assert.ok(html.includes(`src="${PHOTO}"`));           // photo is embedded
-  assert.ok(html.includes('&lt;b&gt;Bob&lt;/b&gt;'));    // name is escaped
-  assert.ok(!html.includes('<b>Bob</b>'));
-  assert.ok(html.includes('Hall &lt;1&gt;'));            // session title is escaped
+  assert.equal(res.headers.get('content-type'), 'application/pdf');
+  assert.match(res.headers.get('content-disposition'), /attendance-2026-10-26-101\.pdf/);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  assert.equal(String.fromCharCode(...bytes.slice(0, 5)), '%PDF-');
+  if (process.env.WRITE_SAMPLE_PDF) writeFileSync(process.env.WRITE_SAMPLE_PDF, bytes);
 
-  assert.equal((await hostB('GET', `/api/host/report?s=${ended.sessionId}`)).status, 404);
+  const hist = await (await hostA('GET', '/api/host/sessions')).json();
+  assert.equal(hist.sessions.length, 1);
+  assert.equal(hist.sessions[0].count, 2);
+  assert.equal((await call('GET', '/api/host/pdf?s=../../x', null, { 'x-host-key': KEY_A })).status, 400);
+});
+
+test('a large session produces a multi-page PDF', async () => {
+  const { hostA, startAs, checkin } = setup();
+  const s = await startAs(hostA, 'Big lecture');
+  for (let i = 1; i <= 120; i++) await checkin(`Student Number ${i}`, s.code);
+  const ended = await (await hostA('POST', '/api/host/end')).json();
+  assert.equal(ended.count, 120);
+  const res = await hostA('GET', `/api/host/pdf?s=${ended.sessionId}`);
+  const doc = await PDFDocument.load(await res.arrayBuffer());
+  assert.ok(doc.getPageCount() >= 4, `expected several pages, got ${doc.getPageCount()}`);
 });

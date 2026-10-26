@@ -1,24 +1,18 @@
 (() => {
   'use strict';
 
+  // Nothing is remembered between check-ins: every time, a student gives a name, takes a fresh
+  // selfie, then scans the host's screen. That also means a phone can be passed around the room.
+
   const $ = (sel) => document.querySelector(sel);
-  const screens = [...document.querySelectorAll('[data-screen]')].filter((el) => el.tagName === 'MAIN');
-
-  // ---- tiny helpers ---------------------------------------------------------
-
-  const ls = {
-    get: (k) => { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
-    set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
-    del: (k) => { try { localStorage.removeItem(k); } catch { /* ignore */ } },
-  };
+  const screens = [...document.querySelectorAll('main[data-screen]')];
 
   const MSG = {
     bad_name: 'Enter your full name.',
-    bad_photo: 'The selfie did not upload. Try again.',
+    bad_photo: 'The selfie did not upload. Take it again.',
     expired: 'That code expired. Scan the screen again.',
     wrong_session: 'That is not a current check-in code.',
     ended: 'That session has ended.',
-    name_in_use: 'Someone with the same name has already checked in to this session. Tell the lecturer.',
     network: 'No connection. Check your internet and try again.',
   };
 
@@ -45,27 +39,26 @@
 
   const stopStream = (stream) => stream && stream.getTracks().forEach((t) => t.stop());
 
-  // ---- state ----------------------------------------------------------------
+  // ---- state: lives in memory only ------------------------------------------
 
-  let pendingCode = '';  // code from a native-camera scan (?c=...)
-  let draft = null;      // { name, photo } waiting to be enrolled
+  let draft = { name: '', photo: '' };
   let busy = false;
 
-  const params = new URLSearchParams(location.search);
-  if (params.get('c')) {
-    pendingCode = params.get('c');
-    history.replaceState(null, '', location.pathname); // do not keep a stale code in the address bar
-  }
+  // The QR is also a link. If someone opened the site by scanning it with their camera app, that
+  // code is already stale by the time they have typed a name, so just explain the order.
+  const cameFromLink = new URLSearchParams(location.search).has('c');
+  if (cameFromLink) history.replaceState(null, '', location.pathname);
 
-  const me = () => ({ id: ls.get('ci_id'), name: ls.get('ci_name'), photo: ls.get('ci_photo') });
-
-  // ---- screen 1: name -------------------------------------------------------
+  // ---- step 1: name -----------------------------------------------------------
 
   const nameInput = $('#name');
   const nameErr = $('#nameErr');
 
   function showName(message = '') {
+    draft = { name: '', photo: '' };
+    nameInput.value = '';
     nameErr.textContent = message;
+    $('#linkHint').hidden = !cameFromLink;
     show('name');
     nameInput.focus({ preventScroll: true });
   }
@@ -74,15 +67,14 @@
     const name = nameInput.value.normalize('NFKC').trim().replace(/\s+/g, ' ');
     if (name.length < 2) { nameErr.textContent = MSG.bad_name; nameInput.focus(); return; }
     nameErr.textContent = '';
-    draft = { name, photo: '' };
+    draft.name = name;
     showSelfie();
   }
 
   $('#nameNext').addEventListener('click', submitName);
   $('#nameForm').addEventListener('submit', (e) => { e.preventDefault(); submitName(); });
-  nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submitName(); } });
 
-  // ---- screen 2: front camera ----------------------------------------------
+  // ---- step 2: front camera ---------------------------------------------------
 
   const selfieVideo = $('#selfieVideo');
   const shoot = $('#shoot');
@@ -90,8 +82,8 @@
   const camNote = $('#camNote');
   let selfieStream = null;
 
-  async function showSelfie() {
-    selfieErr.textContent = '';
+  async function showSelfie(message = '') {
+    selfieErr.textContent = message;
     shoot.disabled = true;
     camNote.textContent = 'Starting the front camera…';
     show('selfie');
@@ -110,10 +102,8 @@
     }
   }
 
-  shoot.addEventListener('click', async () => {
-    if (busy || !selfieVideo.videoWidth) return;
-    busy = true;
-    shoot.disabled = true;
+  shoot.addEventListener('click', () => {
+    if (!selfieVideo.videoWidth) return;
     // Crop the centre square and shrink it: ~160 px at low JPEG quality is a few KB.
     const side = Math.min(selfieVideo.videoWidth, selfieVideo.videoHeight);
     const canvas = document.createElement('canvas');
@@ -126,31 +116,10 @@
     draft.photo = canvas.toDataURL('image/jpeg', 0.5);
     stopStream(selfieStream);
     selfieStream = null;
-    busy = false;
-    await enroll();
+    startScan();
   });
 
-  async function enroll() {
-    if (!draft || !draft.photo) return showName();
-    busy = true;
-    const res = await post('enroll', draft);
-    busy = false;
-    if (res.ok) {
-      ls.set('ci_id', res.data.id);
-      ls.set('ci_name', res.data.name);
-      ls.set('ci_photo', draft.photo);
-      draft = null;
-      return pendingCode ? checkIn(pendingCode) : startScan();
-    }
-    const err = res.data.error;
-    if (err === 'network') return showWait(MSG.network);
-    if (err === 'bad_name') { draft = null; return showName(MSG[err]); }
-    draft.photo = '';
-    selfieErr.textContent = MSG[err] || 'Something went wrong. Try again.';
-    return showSelfie();
-  }
-
-  // ---- screen 3: scan -------------------------------------------------------
+  // ---- step 3: scan -----------------------------------------------------------
 
   const scanVideo = $('#scanVideo');
   const scanMsg = $('#scanMsg');
@@ -170,9 +139,8 @@
   }
 
   async function startScan(message = '') {
-    const who = me();
-    $('#scanName').textContent = who.name;
-    if (who.photo) $('#scanThumb').src = who.photo;
+    $('#scanName').textContent = draft.name;
+    $('#scanThumb').src = draft.photo;
     scanMsg.textContent = message;
     show('scan');
     if (scanStream) stopStream(scanStream);
@@ -184,7 +152,7 @@
       scanVideo.srcObject = scanStream;
       await scanVideo.play();
     } catch {
-      scanMsg.textContent = 'Allow the camera, or scan the code with your phone’s own camera app.';
+      scanMsg.textContent = 'Allow the camera to scan the code on the screen.';
       return;
     }
     scanning = true;
@@ -216,69 +184,42 @@
     setTimeout(tick, 120);
   }
 
-  // ---- check in -------------------------------------------------------------
+  // ---- check in ---------------------------------------------------------------
 
   async function checkIn(code) {
     if (busy) return;
     busy = true;
-    stopScan();
-    const who = me();
-    $('#scanName').textContent = who.name;
-    if (who.photo) $('#scanThumb').src = who.photo;
     scanMsg.textContent = 'Checking in…';
-    show('scan');
-    const res = await post('checkin', { id: who.id, code });
+    const res = await post('checkin', { name: draft.name, photo: draft.photo, code });
     busy = false;
-    pendingCode = '';
     if (res.ok) return showDone(res.data);
     const err = res.data.error;
-    if (err === 'unknown_student') {
-      // The lecturer reset this enrollment (or storage was cleared on the server).
-      ['ci_id', 'ci_name', 'ci_photo'].forEach(ls.del);
-      return showName('Your enrollment was reset. Enter your name again.');
-    }
-    if (err === 'ended' || err === 'name_in_use') return showWait(MSG[err], err === 'ended' ? 'Session ended' : 'Name already used');
-    if (err === 'network') return showWait(MSG.network, 'No connection');
+    if (err === 'bad_name') return showName(MSG.bad_name);
+    if (err === 'bad_photo') return showSelfie(MSG.bad_photo);
+    if (err === 'ended') return showWait(MSG.ended, 'Session ended');
     return startScan(MSG[err] || 'Could not check in. Try again.');
   }
 
-  // ---- screen 4: done / wait -----------------------------------------------
+  // ---- done / wait ------------------------------------------------------------
 
   function showDone({ name, time }) {
     stopScan();
+    draft = { name: '', photo: '' }; // forget everything: the next person starts from scratch
+    $('#scanThumb').removeAttribute('src');
     $('#doneName').textContent = name;
     $('#doneTime').textContent = 'Today at ' + new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     show('done');
   }
 
-  function showWait(text, title = 'No connection') {
+  function showWait(text, title) {
     stopScan();
     $('#waitTitle').textContent = title;
     $('#waitText').textContent = text;
     show('wait');
   }
 
-  // Students can remove their own name and selfie from the server at any time.
-  $('#forget').addEventListener('click', async () => {
-    const { id } = me();
-    if (id) await post('forget', { id });
-    ['ci_id', 'ci_name', 'ci_photo'].forEach(ls.del);
-    showWait('Your name and selfie were deleted from this site. Enroll again to check in next time.', 'Deleted');
-  });
-
-  $('#waitRetry').addEventListener('click', () => {
-    if (draft && draft.photo) return enroll();
-    route();
-  });
-
-  // ---- start ----------------------------------------------------------------
-
-  function route() {
-    const who = me();
-    if (!who.id) return showName();
-    if (pendingCode) return checkIn(pendingCode);
-    return startScan();
-  }
+  $('#another').addEventListener('click', () => showName());
+  $('#waitRetry').addEventListener('click', () => showName());
 
   document.addEventListener('visibilitychange', () => {
     // Free the camera when the tab is hidden; resume scanning when it comes back.
@@ -286,5 +227,5 @@
     else if (document.body.dataset.screen === 'scan' && !scanning && !busy) startScan();
   });
 
-  route();
+  showName();
 })();

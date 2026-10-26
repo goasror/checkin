@@ -96,6 +96,12 @@
       sub.className = 'sub';
       sub.textContent = fmtTime(p.time);
       box.append(name, sub);
+      if (p.dup) {
+        const flag = document.createElement('div');
+        flag.className = 'flag';
+        flag.textContent = 'Same name used more than once';
+        box.append(flag);
+      }
       li.append(img, box);
       ul.append(li);
     }
@@ -169,16 +175,15 @@
 
   // ---- download -------------------------------------------------------------
 
-  // kind: 'report' (page with photos) or 'csv' (names and times only)
-  async function download(sessionId, kind = 'report') {
+  async function download(sessionId) {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    const res = await api(`${kind}?s=${encodeURIComponent(sessionId)}&tz=${encodeURIComponent(tz)}`);
-    if (!res.ok) throw new Error(kind);
+    const res = await api(`pdf?s=${encodeURIComponent(sessionId)}&tz=${encodeURIComponent(tz)}`);
+    if (!res.ok) throw new Error('pdf');
     const blob = await res.blob();
     const match = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = match ? match[1] : `attendance.${kind === 'csv' ? 'csv' : 'html'}`;
+    a.download = match ? match[1] : 'attendance.pdf';
     document.body.append(a);
     a.click();
     a.remove();
@@ -198,8 +203,7 @@
       const label = justEnded.title ? `${justEnded.title} · ` : '';
       $('#endedMeta').textContent = `${label}${fmtDay(justEnded.startedAt)} · ${justEnded.count} checked in`;
       const failed = () => { $('#homeErr').textContent = 'Download failed. Try again.'; };
-      $('#endedDownload').onclick = () => download(justEnded.sessionId, 'report').catch(failed);
-      $('#endedCsv').onclick = () => download(justEnded.sessionId, 'csv').catch(failed);
+      $('#endedDownload').onclick = () => download(justEnded.sessionId).catch(failed);
     }
     $('#linkBox').value = `${location.origin}${location.pathname}#key=${hostKey}`;
     show('home');
@@ -222,16 +226,13 @@
         box.append(top, sub);
         const label = s.title || fmtDay(s.startedAt);
         const failed = () => { $('#homeErr').textContent = 'Download failed. Try again.'; };
-        const mk = (text, kind, aria) => {
-          const b = document.createElement('button');
-          b.type = 'button';
-          b.className = 'pill-btn';
-          b.textContent = text;
-          b.setAttribute('aria-label', aria);
-          b.addEventListener('click', () => download(s.id, kind).catch(failed));
-          return b;
-        };
-        row.append(box, mk('Photos', 'report', `Download report with photos for ${label}`), mk('CSV', 'csv', `Download CSV for ${label}`));
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'icon-btn';
+        btn.setAttribute('aria-label', `Download PDF report for ${label}`);
+        btn.innerHTML = '<svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0f172a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7.5 11l4.5 4.5 4.5-4.5"/><path d="M5 19h14"/></svg>';
+        btn.addEventListener('click', () => download(s.id).catch(failed));
+        row.append(box, btn);
         list.append(row);
       }
       $('#pastEmpty').hidden = sessions.length > 0;

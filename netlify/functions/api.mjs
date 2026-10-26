@@ -1,21 +1,24 @@
 // Lecture check-in API (Netlify Functions v2 + Netlify Blobs).
 //
-// Anyone can host. A host is just a random key kept in their browser (sent as x-host-key);
-// the server only stores a hash of it. Every session has its own secret, so many hosts can run
-// sessions at the same time, and a student only appears in the list of the host whose QR they scanned.
+// Nothing about a student is remembered. Every check-in carries a name, a fresh selfie and the
+// code from the host's screen, so the host gets a new name + face + time each time.
 //
-// Student:  POST /api/enroll   { name, photo }   -> { id, name }
-//           POST /api/checkin  { id, code }      -> { name, time, already }
-//           POST /api/forget   { id }            -> deletes that student's name and selfie
+// Anyone can host. A host is just a random key kept in their browser (sent as x-host-key); the
+// server only stores a hash of it. Every session has its own secret, so many hosts can run sessions
+// at the same time, and a student only appears in the list of the host whose QR they scanned.
+//
+// Student:  POST /api/checkin  { name, photo, code }  -> { name, time, dup }
 // Host (x-host-key header):
 //           POST /api/host/start { title? }      -> starts (or returns) this host's live session
 //           GET  /api/host/state?have=<ids>      -> count, latest check-ins, current QR token
 //           POST /api/host/end
 //           GET  /api/host/sessions              -> this host's finished sessions
-//           GET  /api/host/csv?s=<id>&tz=<zone>  -> attendance file (names and times)
-//           GET  /api/host/report?s=<id>&tz=<zone> -> same, as a page with every student's photo
+//           GET  /api/host/pdf?s=<id>&tz=<zone>  -> attendance report: photo, name and time
 
 import { createHmac, createHash, randomBytes } from 'node:crypto';
+import { PDFDocument, rgb } from 'pdf-lib';
+import fontkit from '@pdf-lib/fontkit';
+import { REGULAR, BOLD } from './font-data.mjs';
 
 const WINDOW_MS = 10_000; // QR rotation
 const MAX_NAME = 80;
@@ -35,9 +38,8 @@ const nameKey = (s) => encodeURIComponent(normName(s).toLowerCase());
 const hostIdFor = (key) => createHash('sha256').update(`host:${key}`).digest('hex').slice(0, 32);
 const tokenFor = (secret, win) => createHmac('sha256', secret).update(String(win)).digest('base64url').slice(0, 12);
 const tokenOk = (given, expected) => {
-  const a = Buffer.from(given);
-  const b = Buffer.from(expected);
-  return a.length === b.length && createHash('sha256').update(a).digest().equals(createHash('sha256').update(b).digest());
+  const h = (v) => createHash('sha256').update(String(v)).digest();
+  return h(given).equals(h(expected));
 };
 
 const readJson = async (req) => {
@@ -58,18 +60,11 @@ export async function handle(req, { db, now = Date.now } = {}) {
   const t = now();
 
   const getSession = (sid) => db.sessions.get(`sess/${sid}`, { type: 'json' });
+  const uniqueCount = async (sid) => (await db.checkins.list({ prefix: `${sid}/n/` })).blobs.length;
 
-  const getStudent = async (id) => {
-    db.cache ??= new Map();
-    if (db.cache.has(id)) return db.cache.get(id);
-    const s = await db.students.get(id, { type: 'json' });
-    if (s) db.cache.set(id, s);
-    return s;
-  };
+  // ---- student endpoint ---------------------------------------------------
 
-  // ---- student endpoints --------------------------------------------------
-
-  if (route === 'enroll' && method === 'POST') {
+  if (route === 'checkin' && method === 'POST') {
     const body = await readJson(req);
     const name = normName(String(body.name ?? ''));
     const photo = String(body.photo ?? '');
@@ -77,23 +72,6 @@ export async function handle(req, { db, now = Date.now } = {}) {
     if (!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(photo) || photo.length > MAX_PHOTO) {
       return fail(400, 'bad_photo');
     }
-    const id = randomBytes(12).toString('base64url');
-    await db.students.setJSON(id, { id, name, photo, createdAt: t });
-    return json({ id, name });
-  }
-
-  if (route === 'forget' && method === 'POST') {
-    const body = await readJson(req);
-    const id = String(body.id ?? '');
-    if (id) {
-      await db.students.delete(id);
-      db.cache?.delete(id);
-    }
-    return json({ ok: true });
-  }
-
-  if (route === 'checkin' && method === 'POST') {
-    const body = await readJson(req);
     const code = String(body.code ?? '');
     const dot = code.lastIndexOf('.');
     const sid = code.slice(0, dot);
@@ -106,25 +84,14 @@ export async function handle(req, { db, now = Date.now } = {}) {
     if (!tokenOk(token, tokenFor(session.secret, win)) && !tokenOk(token, tokenFor(session.secret, win - 1))) {
       return fail(410, 'expired');
     }
-    const id = String(body.id ?? '');
-    const student = id ? await getStudent(id) : null;
-    if (!student) return fail(404, 'unknown_student');
 
-    const byKey = `${sid}/by/${id}`;
-    const before = await db.checkins.get(byKey);
-    if (before) return json({ name: student.name, time: Number(before) || t, already: true });
-
-    // One person per name in a session, so nobody can sit under someone else's name.
-    const claim = `${sid}/name/${nameKey(student.name)}`;
-    const claimed = await db.checkins.set(claim, id, { onlyIfNew: true });
-    if (!claimed.modified && (await db.checkins.get(claim)) !== id) return fail(409, 'name_in_use');
-
-    const first = await db.checkins.set(byKey, String(t), { onlyIfNew: true });
-    if (first.modified) {
-      await db.checkins.set(`${sid}/at/${String(t).padStart(13, '0')}-${id}`, '1');
-      return json({ name: student.name, time: t, already: false });
-    }
-    return json({ name: student.name, time: Number(await db.checkins.get(byKey)) || t, already: true });
+    // Every check-in is kept, with its own photo. A second check-in under the same name is flagged
+    // (not blocked), so the host can compare the faces and decide.
+    const first = await db.checkins.set(`${sid}/n/${nameKey(name)}`, String(t), { onlyIfNew: true });
+    const entry = `${String(t).padStart(13, '0')}-${randomBytes(4).toString('hex')}`;
+    const dup = !first.modified;
+    await db.checkins.setJSON(`${sid}/at/${entry}`, { name, photo, time: t, dup });
+    return json({ name, time: t, dup });
   }
 
   // ---- host endpoints -------------------------------------------------------
@@ -158,18 +125,16 @@ export async function handle(req, { db, now = Date.now } = {}) {
     const session = await activeSession();
     if (!session) return json({ active: false });
     const have = new Set((url.searchParams.get('have') ?? '').split(',').filter(Boolean));
-    const byPrefix = `${session.id}/by/`;
     const atPrefix = `${session.id}/at/`;
-    const [by, at] = await Promise.all([db.checkins.list({ prefix: byPrefix }), db.checkins.list({ prefix: atPrefix })]);
+    const [count, at] = await Promise.all([uniqueCount(session.id), db.checkins.list({ prefix: atPrefix })]);
     const keys = at.blobs.map((b) => b.key).sort().slice(-LATEST).reverse();
     const latest = (
       await Promise.all(
         keys.map(async (k) => {
-          const rest = k.slice(atPrefix.length);
-          const id = rest.slice(14);
-          const s = await getStudent(id);
-          if (!s) return null;
-          return { id, name: s.name, time: Number(rest.slice(0, 13)), photo: have.has(id) ? undefined : s.photo };
+          const e = await db.checkins.get(k, { type: 'json' });
+          if (!e) return null;
+          const id = k.slice(atPrefix.length);
+          return { id, name: e.name, time: e.time, dup: !!e.dup, photo: have.has(id) ? undefined : e.photo };
         }),
       )
     ).filter(Boolean);
@@ -179,7 +144,7 @@ export async function handle(req, { db, now = Date.now } = {}) {
       sessionId: session.id,
       title: session.title,
       startedAt: session.startedAt,
-      count: by.blobs.length,
+      count,
       latest,
       token: tokenFor(session.secret, win),
       msLeft: WINDOW_MS - (t % WINDOW_MS),
@@ -189,8 +154,7 @@ export async function handle(req, { db, now = Date.now } = {}) {
   if (action === 'end' && method === 'POST') {
     const session = await activeSession();
     if (!session) return fail(409, 'no_session');
-    const by = await db.checkins.list({ prefix: `${session.id}/by/` });
-    const done = { ...session, endedAt: t, count: by.blobs.length };
+    const done = { ...session, endedAt: t, count: await uniqueCount(session.id) };
     await db.sessions.setJSON(`sess/${session.id}`, done);
     await db.sessions.delete(`active/${hostId}`);
     return json({ sessionId: done.id, title: done.title, startedAt: done.startedAt, endedAt: done.endedAt, count: done.count });
@@ -208,7 +172,7 @@ export async function handle(req, { db, now = Date.now } = {}) {
     return json({ sessions });
   }
 
-  if ((action === 'csv' || action === 'report') && method === 'GET') {
+  if (action === 'pdf' && method === 'GET') {
     const sid = url.searchParams.get('s') ?? '';
     if (!/^[A-Za-z0-9-]{1,40}$/.test(sid)) return fail(400, 'bad_session');
     const session = await getSession(sid);
@@ -219,83 +183,117 @@ export async function handle(req, { db, now = Date.now } = {}) {
     } catch {
       tz = 'UTC';
     }
-    const local = (ms) => new Date(ms).toLocaleString('sv-SE', { timeZone: tz });
-    const prefix = `${sid}/by/`;
+    const prefix = `${sid}/at/`;
     const { blobs } = await db.checkins.list({ prefix });
-    const rows = await Promise.all(
-      blobs.map(async (b) => {
-        const id = b.key.slice(prefix.length);
-        const [s, at] = await Promise.all([getStudent(id), db.checkins.get(b.key)]);
-        return { name: s?.name ?? '(deleted by student)', time: Number(at) || 0, photo: s?.photo ?? '' };
-      }),
-    );
-    rows.sort((a, b) => a.time - b.time);
+    const entries = (
+      await Promise.all(blobs.map((b) => b.key).sort().map((k) => db.checkins.get(k, { type: 'json' })))
+    ).filter(Boolean);
+    const count = await uniqueCount(sid);
+
+    const date = (ms) => new Date(ms).toLocaleString('sv-SE', { timeZone: tz });
     const day = new Date(session.startedAt).toLocaleDateString('sv-SE', { timeZone: tz });
     const slug = (session.title || '').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30);
-    const base = `attendance-${day}${slug ? '-' + slug : ''}`;
-
-    if (action === 'report') {
-      // One self-contained page: every photo is embedded, so it works offline and prints to PDF.
-      const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-      const trs = rows
-        .map(
-          (r, i) =>
-            `<tr><td class="n">${i + 1}</td><td>${r.photo ? `<img src="${esc(r.photo)}" width="72" height="72" alt="">` : ''}</td><td class="name">${esc(r.name)}</td><td>${esc(local(r.time))}</td></tr>`,
-        )
-        .join('\n');
-      const html = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Attendance · ${esc(session.title || sid)}</title>
-<style>
-body{font:15px/1.4 system-ui,-apple-system,'Segoe UI',sans-serif;color:#0f172a;margin:32px auto;max-width:760px;padding:0 20px}
-h1{margin:0;font-size:28px;letter-spacing:-.02em}
-.meta{margin:6px 0 20px;color:#5b6475}
-button{height:44px;padding:0 18px;border:1.5px solid #7e889c;border-radius:12px;background:#fff;font-family:inherit;font-weight:700;font-size:15px;cursor:pointer}
-table{width:100%;border-collapse:collapse;margin-top:20px}
-th{text-align:left;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#5b6475;border-bottom:2px solid #dfe3ec;padding:8px}
-td{padding:8px;border-bottom:1px solid #e3e7ef;vertical-align:middle}
-td.n{width:40px;color:#5b6475}
-td.name{font-weight:700;font-size:17px}
-img{display:block;border-radius:10px;object-fit:cover;background:#e8ecf4}
-tr{break-inside:avoid}
-@media print{button{display:none}body{margin:0}}
-</style></head><body>
-<h1>${esc(session.title || 'Attendance')}</h1>
-<p class="meta">${esc(local(session.startedAt))} (${esc(tz)}) · ${rows.length} checked in</p>
-<button onclick="print()">Print or save as PDF</button>
-<table><thead><tr><th>#</th><th>Photo</th><th>Name</th><th>Checked in</th></tr></thead><tbody>
-${trs}
-</tbody></table></body></html>`;
-      return new Response(html, {
-        status: 200,
-        headers: {
-          'content-type': 'text/html; charset=utf-8',
-          'content-disposition': `attachment; filename="${base}.html"`,
-          'cache-control': 'no-store',
-        },
-      });
-    }
-
-    // Quote every field; neutralise spreadsheet formulas in names.
-    const cell = (v) => `"${String(/^[=+\-@\t\r]/.test(v) ? `'${v}` : v).replace(/"/g, '""')}"`;
-    const header = [['Session', session.title || sid], ['Started', local(session.startedAt)]];
-    const lines = [
-      ...header.map((r) => r.map(cell).join(',')),
-      '',
-      ['Name', `Checked in (${tz})`, 'Checked in (UTC)'].map(cell).join(','),
-      ...rows.map((r) => [r.name, local(r.time), new Date(r.time).toISOString()].map(cell).join(',')),
-    ];
-    return new Response('﻿' + lines.join('\r\n') + '\r\n', {
+    const pdf = await buildPdf({
+      title: session.title || 'Attendance',
+      subtitle: `${date(session.startedAt)} (${tz})  ·  ${count} checked in`,
+      entries,
+      time: (ms) => new Date(ms).toLocaleTimeString('sv-SE', { timeZone: tz }),
+    });
+    return new Response(pdf, {
       status: 200,
       headers: {
-        'content-type': 'text/csv; charset=utf-8',
-        'content-disposition': `attachment; filename="${base}.csv"`,
+        'content-type': 'application/pdf',
+        'content-disposition': `attachment; filename="attendance-${day}${slug ? '-' + slug : ''}.pdf"`,
         'cache-control': 'no-store',
       },
     });
   }
 
   return fail(404, 'not_found');
+}
+
+// ---- PDF report -------------------------------------------------------------
+// A4, two columns of cards: photo, name, time. Latin, Cyrillic and Greek names render;
+// other scripts show as "?".
+
+async function buildPdf({ title, subtitle, entries, time }) {
+  const pdf = await PDFDocument.create();
+  pdf.registerFontkit(fontkit);
+  const font = await pdf.embedFont(Buffer.from(REGULAR, 'base64'), { subset: true });
+  const bold = await pdf.embedFont(Buffer.from(BOLD, 'base64'), { subset: true });
+  const known = new Set(font.getCharacterSet());
+  const safe = (s) => [...String(s)].map((ch) => (known.has(ch.codePointAt(0)) ? ch : '?')).join('');
+  const fit = (text, f, size, maxW) => {
+    let s = safe(text);
+    if (f.widthOfTextAtSize(s, size) <= maxW) return s;
+    while (s.length > 1 && f.widthOfTextAtSize(s + '…', size) > maxW) s = s.slice(0, -1);
+    return s + '…';
+  };
+
+  const W = 595.28;
+  const H = 841.89;
+  const M = 40;
+  const GAP = 20;
+  const COL_W = (W - 2 * M - GAP) / 2;
+  const CELL_H = 60;
+  const PHOTO = 48;
+  const ink = rgb(0.059, 0.09, 0.165);
+  const muted = rgb(0.357, 0.392, 0.459);
+  const rule = rgb(0.875, 0.89, 0.925);
+  const warn = rgb(0.71, 0.27, 0.07);
+
+  const pages = [];
+  const newPage = () => {
+    const page = pdf.addPage([W, H]);
+    pages.push(page);
+    let top = H - M;
+    if (pages.length === 1) {
+      page.drawText(fit(title, bold, 22, W - 2 * M), { x: M, y: top - 22, size: 22, font: bold, color: ink });
+      page.drawText(safe(subtitle), { x: M, y: top - 44, size: 11, font, color: muted });
+      top -= 62;
+    } else {
+      page.drawText(fit(title, font, 10, W - 2 * M), { x: M, y: top - 10, size: 10, font, color: muted });
+      top -= 22;
+    }
+    page.drawLine({ start: { x: M, y: top }, end: { x: W - M, y: top }, thickness: 1, color: rule });
+    return { page, y: top - 14 };
+  };
+
+  // Flag every check-in that shares a name with another one, so both faces can be compared.
+  const seen = new Map();
+  for (const e of entries) seen.set(nameKey(e.name), (seen.get(nameKey(e.name)) ?? 0) + 1);
+
+  let { page, y } = newPage();
+  for (let i = 0; i < entries.length; i++) {
+    const col = i % 2;
+    if (col === 0 && i > 0) y -= CELL_H;
+    if (y - CELL_H < M + 24) ({ page, y } = newPage());
+    const e = entries[i];
+    const x = M + col * (COL_W + GAP);
+    const bottom = y - PHOTO;
+
+    page.drawText(String(i + 1), { x, y: bottom + PHOTO / 2 - 4, size: 9, font, color: muted });
+    try {
+      const bytes = Buffer.from(e.photo.split(',')[1] ?? '', 'base64');
+      const img = await pdf.embedJpg(bytes);
+      page.drawImage(img, { x: x + 24, y: bottom, width: PHOTO, height: PHOTO });
+    } catch {
+      page.drawRectangle({ x: x + 24, y: bottom, width: PHOTO, height: PHOTO, color: rule });
+    }
+    const tx = x + 24 + PHOTO + 10;
+    const maxW = COL_W - 24 - PHOTO - 10;
+    page.drawText(fit(e.name, bold, 12.5, maxW), { x: tx, y: bottom + PHOTO - 14, size: 12.5, font: bold, color: ink });
+    page.drawText(time(e.time), { x: tx, y: bottom + PHOTO - 30, size: 10.5, font, color: muted });
+    if (seen.get(nameKey(e.name)) > 1) {
+      page.drawText('Same name used more than once', { x: tx, y: bottom + PHOTO - 43, size: 8, font: bold, color: warn });
+    }
+  }
+
+  pages.forEach((p, n) => {
+    p.drawText(`Page ${n + 1} of ${pages.length}`, { x: W - M - 60, y: M - 12, size: 8.5, font, color: muted });
+  });
+  pdf.setTitle(safe(title));
+  return pdf.save();
 }
 
 // ---------------------------------------------------------------------------
@@ -305,7 +303,7 @@ async function realStores() {
   if (realDb) return realDb;
   const { getStore } = await import('@netlify/blobs');
   const open = (name) => getStore({ name, consistency: 'strong' });
-  realDb = { students: open('students'), sessions: open('sessions'), checkins: open('checkins') };
+  realDb = { sessions: open('sessions'), checkins: open('checkins') };
   return realDb;
 }
 

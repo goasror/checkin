@@ -206,6 +206,7 @@ body[data-screen='scan'] { background: #0b1020; }
 .row .name { flex-grow: 1; min-width: 0; font-size: 16px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row .meta { font-size: 13px; font-weight: 600; color: var(--muted); }
 .row .sub { margin-top: 2px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.row .flag { margin-top: 2px; font-size: 12px; font-weight: 800; color: #b3450f; }
 .empty { padding: 18px 4px; font-size: 15px; color: var(--muted); }
 
 .ended-circle { width: 56px; height: 56px; border-radius: 50%; background: var(--ok-bg); display: grid; place-items: center; }
