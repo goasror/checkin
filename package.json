@@ -1,0 +1,13 @@
+{
+  "name": "lecture-checkin",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Rotating-QR lecture attendance with a name and selfie, for Netlify.",
+  "scripts": {
+    "test": "node --test tests/api.test.mjs"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^11.1.6"
+  }
+}
