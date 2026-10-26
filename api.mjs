@@ -277,7 +277,7 @@ async function buildPdf({ title, subtitle, entries, time }) {
 
     page.drawText(String(i + 1), { x, y: bottom + PHOTO / 2 - 4, size: 9, font, color: muted });
     try {
-      const bytes = Buffer.from(e.photo.split(',')[1] ?? '', 'base64');
+      const bytes = new Uint8Array(Buffer.from(e.photo.split(',')[1] ?? '', 'base64')); // copy: pdf-lib misreads Buffer's shared pool
       const img = await pdf.embedJpg(bytes);
       page.drawImage(img, { x: x + 24, y: bottom, width: PHOTO, height: PHOTO });
     } catch {

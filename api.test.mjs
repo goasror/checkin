@@ -148,6 +148,7 @@ test('ending a session closes it and the PDF report is produced', async () => {
   assert.match(res.headers.get('content-disposition'), /attendance-2026-10-26-101\.pdf/);
   const bytes = new Uint8Array(await res.arrayBuffer());
   assert.equal(String.fromCharCode(...bytes.slice(0, 5)), '%PDF-');
+  assert.ok(Buffer.from(bytes).toString('latin1').includes('/Subtype /Image'), 'photos must be embedded, not grey boxes');
   if (process.env.WRITE_SAMPLE_PDF) writeFileSync(process.env.WRITE_SAMPLE_PDF, bytes);
 
   const hist = await (await hostA('GET', '/api/host/sessions')).json();
