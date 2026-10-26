@@ -277,10 +277,12 @@ async function buildPdf({ title, subtitle, entries, time }) {
 
     page.drawText(String(i + 1), { x, y: bottom + PHOTO / 2 - 4, size: 9, font, color: muted });
     try {
-      const bytes = new Uint8Array(Buffer.from(e.photo.split(',')[1] ?? '', 'base64')); // copy: pdf-lib misreads Buffer's shared pool
-      const img = await pdf.embedJpg(bytes);
+      const raw = new Uint8Array(Buffer.from(e.photo.split(',')[1] ?? '', 'base64')); // copy: pdf-lib misreads Buffer's shared pool
+      const soi = raw.findIndex((b, k) => b === 0xff && raw[k + 1] === 0xd8); // tolerate stray leading bytes
+      const img = await pdf.embedJpg(soi > 0 ? raw.slice(soi) : raw);
       page.drawImage(img, { x: x + 24, y: bottom, width: PHOTO, height: PHOTO });
-    } catch {
+    } catch (err) {
+      console.error('pdf: photo could not be embedded for', i + 1, String(err?.message ?? err), 'len', e.photo?.length);
       page.drawRectangle({ x: x + 24, y: bottom, width: PHOTO, height: PHOTO, color: rule });
     }
     const tx = x + 24 + PHOTO + 10;
