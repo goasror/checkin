@@ -48,7 +48,7 @@ The server stores only a hash of it. That means:
 
 ## What it guards against, and what it does not
 
-- A photographed or screen-shared QR stops working after about 20 seconds, and stops completely when the host ends the session.
+- A photographed or screen-shared QR stops working after about 13 seconds (10 s plus a 3 s grace for scans in flight), and stops completely when the host ends the session.
 - Checking in for a friend puts the friend's own face (or yours) next to the name in a list the lecturer sees.
 - If the same name is used twice in a session, both check-ins are kept and flagged ("Same name used more
   than once"), in the live list and in the PDF, so the faces can be compared.
