@@ -29,8 +29,10 @@ Netlify Drop (dragging a folder into the dashboard) does not build functions. Us
 - A student opens the site, types their name, takes a selfie. Next time they land straight on the scanner.
   Scanning with the phone's own camera app also works: the QR is a link that checks them in.
 - The host sees the count and the latest names with photos, and glances at them against the room.
-- The host taps **End & download** (twice, so it cannot happen by accident). The CSV downloads.
-  Earlier sessions stay on the host page, each with its own download button.
+- The host taps **End & download** (twice, so it cannot happen by accident). A report page with every
+  student's photo and name downloads. Open it in any browser; **Print or save as PDF** turns it into a PDF.
+  A plain CSV (names and times, no photos) is one tap away. Earlier sessions stay on the host page,
+  each with its own Photos and CSV buttons.
 
 ## How hosts are identified
 

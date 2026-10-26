@@ -169,15 +169,16 @@
 
   // ---- download -------------------------------------------------------------
 
-  async function download(sessionId) {
+  // kind: 'report' (page with photos) or 'csv' (names and times only)
+  async function download(sessionId, kind = 'report') {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    const res = await api(`csv?s=${encodeURIComponent(sessionId)}&tz=${encodeURIComponent(tz)}`);
-    if (!res.ok) throw new Error('csv');
+    const res = await api(`${kind}?s=${encodeURIComponent(sessionId)}&tz=${encodeURIComponent(tz)}`);
+    if (!res.ok) throw new Error(kind);
     const blob = await res.blob();
     const match = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = match ? match[1] : 'attendance.csv';
+    a.download = match ? match[1] : `attendance.${kind === 'csv' ? 'csv' : 'html'}`;
     document.body.append(a);
     a.click();
     a.remove();
@@ -196,7 +197,9 @@
     if (justEnded) {
       const label = justEnded.title ? `${justEnded.title} · ` : '';
       $('#endedMeta').textContent = `${label}${fmtDay(justEnded.startedAt)} · ${justEnded.count} checked in`;
-      $('#endedDownload').onclick = () => download(justEnded.sessionId).catch(() => { $('#homeErr').textContent = 'Download failed. Try again.'; });
+      const failed = () => { $('#homeErr').textContent = 'Download failed. Try again.'; };
+      $('#endedDownload').onclick = () => download(justEnded.sessionId, 'report').catch(failed);
+      $('#endedCsv').onclick = () => download(justEnded.sessionId, 'csv').catch(failed);
     }
     $('#linkBox').value = `${location.origin}${location.pathname}#key=${hostKey}`;
     show('home');
@@ -217,13 +220,18 @@
         sub.className = 'sub';
         sub.textContent = `${s.title ? fmtDay(s.startedAt) + ' · ' : ''}${s.count} checked in`;
         box.append(top, sub);
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'icon-btn';
-        btn.setAttribute('aria-label', `Download attendance for ${s.title || fmtDay(s.startedAt)}`);
-        btn.innerHTML = '<svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0f172a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7.5 11l4.5 4.5 4.5-4.5"/><path d="M5 19h14"/></svg>';
-        btn.addEventListener('click', () => download(s.id).catch(() => { $('#homeErr').textContent = 'Download failed. Try again.'; }));
-        row.append(box, btn);
+        const label = s.title || fmtDay(s.startedAt);
+        const failed = () => { $('#homeErr').textContent = 'Download failed. Try again.'; };
+        const mk = (text, kind, aria) => {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'pill-btn';
+          b.textContent = text;
+          b.setAttribute('aria-label', aria);
+          b.addEventListener('click', () => download(s.id, kind).catch(failed));
+          return b;
+        };
+        row.append(box, mk('Photos', 'report', `Download report with photos for ${label}`), mk('CSV', 'csv', `Download CSV for ${label}`));
         list.append(row);
       }
       $('#pastEmpty').hidden = sessions.length > 0;

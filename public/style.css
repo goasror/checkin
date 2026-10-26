@@ -89,6 +89,18 @@ input:focus { outline: 3px solid #b9c6ff; border-color: var(--accent); }
 }
 .btn-outline.armed { background: var(--ink); border-color: var(--ink); color: #fff; }
 .btn-outline.armed svg { stroke: #fff; }
+.pill-btn {
+  min-width: 56px;
+  height: 44px;
+  padding: 0 12px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 12px;
+  background: #eef1f9;
+  color: var(--ink);
+  font: 700 14px var(--font);
+  cursor: pointer;
+}
 .icon-btn {
   width: 48px;
   height: 48px;

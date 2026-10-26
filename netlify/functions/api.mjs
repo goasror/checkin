@@ -12,7 +12,8 @@
 //           GET  /api/host/state?have=<ids>      -> count, latest check-ins, current QR token
 //           POST /api/host/end
 //           GET  /api/host/sessions              -> this host's finished sessions
-//           GET  /api/host/csv?s=<id>&tz=<zone>  -> attendance file
+//           GET  /api/host/csv?s=<id>&tz=<zone>  -> attendance file (names and times)
+//           GET  /api/host/report?s=<id>&tz=<zone> -> same, as a page with every student's photo
 
 import { createHmac, createHash, randomBytes } from 'node:crypto';
 
@@ -207,7 +208,7 @@ export async function handle(req, { db, now = Date.now } = {}) {
     return json({ sessions });
   }
 
-  if (action === 'csv' && method === 'GET') {
+  if ((action === 'csv' || action === 'report') && method === 'GET') {
     const sid = url.searchParams.get('s') ?? '';
     if (!/^[A-Za-z0-9-]{1,40}$/.test(sid)) return fail(400, 'bad_session');
     const session = await getSession(sid);
@@ -225,10 +226,56 @@ export async function handle(req, { db, now = Date.now } = {}) {
       blobs.map(async (b) => {
         const id = b.key.slice(prefix.length);
         const [s, at] = await Promise.all([getStudent(id), db.checkins.get(b.key)]);
-        return { name: s?.name ?? '(deleted by student)', time: Number(at) || 0 };
+        return { name: s?.name ?? '(deleted by student)', time: Number(at) || 0, photo: s?.photo ?? '' };
       }),
     );
     rows.sort((a, b) => a.time - b.time);
+    const day = new Date(session.startedAt).toLocaleDateString('sv-SE', { timeZone: tz });
+    const slug = (session.title || '').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30);
+    const base = `attendance-${day}${slug ? '-' + slug : ''}`;
+
+    if (action === 'report') {
+      // One self-contained page: every photo is embedded, so it works offline and prints to PDF.
+      const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      const trs = rows
+        .map(
+          (r, i) =>
+            `<tr><td class="n">${i + 1}</td><td>${r.photo ? `<img src="${esc(r.photo)}" width="72" height="72" alt="">` : ''}</td><td class="name">${esc(r.name)}</td><td>${esc(local(r.time))}</td></tr>`,
+        )
+        .join('\n');
+      const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Attendance · ${esc(session.title || sid)}</title>
+<style>
+body{font:15px/1.4 system-ui,-apple-system,'Segoe UI',sans-serif;color:#0f172a;margin:32px auto;max-width:760px;padding:0 20px}
+h1{margin:0;font-size:28px;letter-spacing:-.02em}
+.meta{margin:6px 0 20px;color:#5b6475}
+button{height:44px;padding:0 18px;border:1.5px solid #7e889c;border-radius:12px;background:#fff;font-family:inherit;font-weight:700;font-size:15px;cursor:pointer}
+table{width:100%;border-collapse:collapse;margin-top:20px}
+th{text-align:left;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#5b6475;border-bottom:2px solid #dfe3ec;padding:8px}
+td{padding:8px;border-bottom:1px solid #e3e7ef;vertical-align:middle}
+td.n{width:40px;color:#5b6475}
+td.name{font-weight:700;font-size:17px}
+img{display:block;border-radius:10px;object-fit:cover;background:#e8ecf4}
+tr{break-inside:avoid}
+@media print{button{display:none}body{margin:0}}
+</style></head><body>
+<h1>${esc(session.title || 'Attendance')}</h1>
+<p class="meta">${esc(local(session.startedAt))} (${esc(tz)}) · ${rows.length} checked in</p>
+<button onclick="print()">Print or save as PDF</button>
+<table><thead><tr><th>#</th><th>Photo</th><th>Name</th><th>Checked in</th></tr></thead><tbody>
+${trs}
+</tbody></table></body></html>`;
+      return new Response(html, {
+        status: 200,
+        headers: {
+          'content-type': 'text/html; charset=utf-8',
+          'content-disposition': `attachment; filename="${base}.html"`,
+          'cache-control': 'no-store',
+        },
+      });
+    }
+
     // Quote every field; neutralise spreadsheet formulas in names.
     const cell = (v) => `"${String(/^[=+\-@\t\r]/.test(v) ? `'${v}` : v).replace(/"/g, '""')}"`;
     const header = [['Session', session.title || sid], ['Started', local(session.startedAt)]];
@@ -238,13 +285,11 @@ export async function handle(req, { db, now = Date.now } = {}) {
       ['Name', `Checked in (${tz})`, 'Checked in (UTC)'].map(cell).join(','),
       ...rows.map((r) => [r.name, local(r.time), new Date(r.time).toISOString()].map(cell).join(',')),
     ];
-    const day = new Date(session.startedAt).toLocaleDateString('sv-SE', { timeZone: tz });
-    const slug = (session.title || '').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30);
     return new Response('﻿' + lines.join('\r\n') + '\r\n', {
       status: 200,
       headers: {
         'content-type': 'text/csv; charset=utf-8',
-        'content-disposition': `attachment; filename="attendance-${day}${slug ? '-' + slug : ''}.csv"`,
+        'content-disposition': `attachment; filename="${base}.csv"`,
         'cache-control': 'no-store',
       },
     });

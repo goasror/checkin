@@ -158,3 +158,23 @@ test('forget deletes a student', async () => {
   assert.equal((await call('POST', '/api/forget', { id })).status, 200);
   assert.equal((await call('POST', '/api/checkin', { id, code: s.code })).status, 404);
 });
+
+test('report page embeds photos, escapes names, and is private to its host', async () => {
+  const { call, hostA, hostB, enroll, startAs } = setup();
+  const id = await enroll('<b>Bob</b> & "Co"');
+  const s = await startAs(hostA, 'Hall <1>');
+  await call('POST', '/api/checkin', { id, code: s.code });
+  const ended = await (await hostA('POST', '/api/host/end')).json();
+
+  const res = await hostA('GET', `/api/host/report?s=${ended.sessionId}&tz=UTC`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /text\/html/);
+  assert.match(res.headers.get('content-disposition'), /attendance-2026-10-26-Hall-1\.html/);
+  const html = await res.text();
+  assert.ok(html.includes(`src="${PHOTO}"`));           // photo is embedded
+  assert.ok(html.includes('&lt;b&gt;Bob&lt;/b&gt;'));    // name is escaped
+  assert.ok(!html.includes('<b>Bob</b>'));
+  assert.ok(html.includes('Hall &lt;1&gt;'));            // session title is escaped
+
+  assert.equal((await hostB('GET', `/api/host/report?s=${ended.sessionId}`)).status, 404);
+});
