@@ -160,6 +160,7 @@ body[data-screen='scan'] { background: #0b1020; }
 .center .who { margin-top: 16px; font-size: 20px; font-weight: 700; }
 .center .when { margin-top: 6px; font-size: 16px; font-weight: 500; color: var(--muted); }
 .foot { text-align: center; font-size: 14px; color: var(--muted); }
+.linkbtn { margin-top: 12px; min-height: 44px; padding: 0 12px; border: 0; background: none; color: var(--muted); font: 600 14px var(--font); text-decoration: underline; cursor: pointer; }
 
 /* ---------- host ---------- */
 .host { max-width: 440px; padding: calc(env(safe-area-inset-top) + 32px) 20px calc(env(safe-area-inset-bottom) + 24px); }

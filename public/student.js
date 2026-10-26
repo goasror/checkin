@@ -13,12 +13,12 @@
   };
 
   const MSG = {
-    no_session: 'The lecturer has not started the session yet.',
-    name_taken: 'That name is already enrolled. Ask your lecturer to reset it.',
     bad_name: 'Enter your full name.',
     bad_photo: 'The selfie did not upload. Try again.',
     expired: 'That code expired. Scan the screen again.',
-    wrong_session: 'That code is from another session.',
+    wrong_session: 'That is not a current check-in code.',
+    ended: 'That session has ended.',
+    name_in_use: 'Someone with the same name has already checked in to this session. Tell the lecturer.',
     network: 'No connection. Check your internet and try again.',
   };
 
@@ -143,8 +143,8 @@
       return pendingCode ? checkIn(pendingCode) : startScan();
     }
     const err = res.data.error;
-    if (err === 'no_session' || err === 'network') return showWait(MSG[err]);
-    if (err === 'name_taken' || err === 'bad_name') { draft = null; return showName(MSG[err]); }
+    if (err === 'network') return showWait(MSG.network);
+    if (err === 'bad_name') { draft = null; return showName(MSG[err]); }
     draft.photo = '';
     selfieErr.textContent = MSG[err] || 'Something went wrong. Try again.';
     return showSelfie();
@@ -237,7 +237,8 @@
       ['ci_id', 'ci_name', 'ci_photo'].forEach(ls.del);
       return showName('Your enrollment was reset. Enter your name again.');
     }
-    if (err === 'no_session') return showWait(MSG.no_session);
+    if (err === 'ended' || err === 'name_in_use') return showWait(MSG[err], err === 'ended' ? 'Session ended' : 'Name already used');
+    if (err === 'network') return showWait(MSG.network, 'No connection');
     return startScan(MSG[err] || 'Could not check in. Try again.');
   }
 
@@ -250,11 +251,20 @@
     show('done');
   }
 
-  function showWait(text) {
+  function showWait(text, title = 'No connection') {
     stopScan();
+    $('#waitTitle').textContent = title;
     $('#waitText').textContent = text;
     show('wait');
   }
+
+  // Students can remove their own name and selfie from the server at any time.
+  $('#forget').addEventListener('click', async () => {
+    const { id } = me();
+    if (id) await post('forget', { id });
+    ['ci_id', 'ci_name', 'ci_photo'].forEach(ls.del);
+    showWait('Your name and selfie were deleted from this site. Enroll again to check in next time.', 'Deleted');
+  });
 
   $('#waitRetry').addEventListener('click', () => {
     if (draft && draft.photo) return enroll();
