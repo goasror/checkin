@@ -189,3 +189,22 @@ test('a host can delete their own ended sessions, and only those', async () => {
   assert.deepEqual(list.map((x) => x.title), ['Keep me']); // the other session is untouched
   assert.equal((await hostA('GET', `/api/host/pdf?s=${keep.sessionId}`)).status, 200);
 });
+
+test('sessions that ended more than a week ago are purged when the host starts a new one', async () => {
+  const { hostA, hostB, startAs, checkin, clock, call } = setup();
+  const old = await startAs(hostA, 'Last month');
+  await checkin('Ada Lovelace', old.code);
+  const endedOld = await (await hostA('POST', '/api/host/end')).json();
+  const other = await startAs(hostB, 'Other host');
+  await checkin('Alan Turing', other.code);
+  await hostB('POST', '/api/host/end');
+  clock.t += 2 * 24 * 3600 * 1000;
+  await hostA('POST', '/api/host/start', { title: 'Two days later' });
+  assert.equal((await hostA('GET', `/api/host/pdf?s=${endedOld.sessionId}`)).status, 200); // still kept
+  await hostA('POST', '/api/host/end');
+  clock.t += 8 * 24 * 3600 * 1000;
+  await hostA('POST', '/api/host/start', { title: 'Next week' });
+  assert.equal((await hostA('GET', `/api/host/pdf?s=${endedOld.sessionId}`)).status, 404); // purged
+  assert.equal((await hostB('GET', '/api/host/sessions')).status, 200);
+  assert.equal((await (await hostB('GET', '/api/host/sessions')).json()).sessions.length, 1); // other host untouched
+});

@@ -34,7 +34,7 @@ Netlify Drop (dragging a folder into the dashboard) does not build functions. Us
   Then a confirmation appears. **Check in someone else** starts again for the next person on the same phone.
 - The host sees the count and the latest check-ins with photos, and glances at them against the room.
 - The host taps **End & download** (twice, so it cannot happen by accident). A PDF downloads: two columns,
-  each with photo, name and time. Earlier sessions stay on the host page, each with a download button and a delete button (tap twice; it removes the photos too, for good).
+  each with photo, name and time. The host page does not list old sessions: download the PDF right after ending. A session that ended more than 7 days ago, with its photos, is deleted automatically the next time that host starts a lecture.
 
 ## How hosts are identified
 
@@ -42,7 +42,7 @@ A host is a random key the browser creates the first time `/host.html` opens and
 The server stores only a hash of it. That means:
 
 - No sign-up, no passcode. Opening the page is enough.
-- Sessions belong to that browser. Clearing the browser data loses access to earlier downloads.
+- Sessions belong to that browser. Clearing the browser data loses access to a session you have not downloaded yet.
 - The host page has **Use on another device**: a link containing the key. Anyone who has that link can
   download the host's files, so treat it like a password.
 
@@ -77,7 +77,7 @@ Camera access needs HTTPS or `localhost`, which `netlify dev` and Netlify both p
 
 ```
 public/index.html, student.js    student pages: name, selfie, scan, done
-public/host.html,  host.js       host pages: live QR, end and download, earlier sessions
+public/host.html,  host.js       host pages: live QR, end and download
 public/style.css                 shared styles
 public/vendor/                   qrcode-generator (MIT) and jsQR (Apache-2.0), copied from npm
 netlify/functions/api.mjs        all server logic, including the PDF report

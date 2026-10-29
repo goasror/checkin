@@ -26,6 +26,7 @@ const MAX_NAME = 80;
 const MAX_TITLE = 60;
 const MAX_PHOTO = 40_000; // characters of the base64 data URL
 const LATEST = 12;
+const KEEP_MS = 7 * 24 * 3600 * 1000; // how long ended sessions (and their photos) are kept
 const BUILD = 'pdf-photos-3'; // printed in the PDF footer so you can tell which version is deployed
 
 const json = (data, status = 200, headers = {}) =>
@@ -112,7 +113,23 @@ export async function handle(req, { db, now = Date.now } = {}) {
     return s && !s.endedAt ? s : null;
   };
 
+  // Remove a session, its check-ins and its history entry (hidden first, record last).
+  const removeSession = async (sid) => {
+    await db.sessions.delete(`h/${hostId}/${sid}`);
+    const { blobs } = await db.checkins.list({ prefix: `${sid}/` });
+    await Promise.all(blobs.map((b) => db.checkins.delete(b.key)));
+    await db.sessions.delete(`sess/${sid}`);
+    return blobs.length;
+  };
+
   if (action === 'start' && method === 'POST') {
+    // Photos are not kept forever: this host's sessions that ended more than a week ago are removed.
+    const old = await db.sessions.list({ prefix: `h/${hostId}/` });
+    for (const b of old.blobs) {
+      const sid = b.key.slice(`h/${hostId}/`.length);
+      const prev = await getSession(sid);
+      if (!prev || (prev.endedAt && t - prev.endedAt > KEEP_MS)) await removeSession(sid);
+    }
     const existing = await activeSession();
     if (existing) return json({ sessionId: existing.id, startedAt: existing.startedAt });
     const body = await readJson(req);
@@ -171,12 +188,7 @@ export async function handle(req, { db, now = Date.now } = {}) {
     const session = await getSession(sid);
     if (!session || session.hostId !== hostId) return fail(404, 'no_such_session'); // only your own
     if (!session.endedAt) return fail(409, 'still_running'); // end it first
-    // Hide it from the list first, then remove the photos and finally the record itself.
-    await db.sessions.delete(`h/${hostId}/${sid}`);
-    const { blobs } = await db.checkins.list({ prefix: `${sid}/` });
-    await Promise.all(blobs.map((b) => db.checkins.delete(b.key)));
-    await db.sessions.delete(`sess/${sid}`);
-    return json({ deleted: sid, removed: blobs.length });
+    return json({ deleted: sid, removed: await removeSession(sid) });
   }
 
   if (action === 'sessions' && method === 'GET') {

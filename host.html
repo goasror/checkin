@@ -48,7 +48,7 @@
   </div>
 </main>
 
-<!-- no session running: start one, or download earlier ones -->
+<!-- no session running: start one, or download the one that just ended -->
 <main class="screen host" data-screen="home" hidden>
   <div id="endedBlock" hidden>
     <div class="ended-circle"><svg aria-hidden="true" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#067a55" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
@@ -72,13 +72,9 @@
   </div>
   <p class="err" id="homeErr" role="alert"></p>
 
-  <h2 class="section-h">Your earlier sessions</h2>
-  <div class="list" id="past"></div>
-  <p class="empty" id="pastEmpty" hidden>No finished sessions yet.</p>
-
   <details class="admin">
     <summary>Use this on another device</summary>
-    <p>Your sessions belong to this browser. Open this link on another device to manage them there too. Anyone who has the link can download your attendance files, so keep it to yourself.</p>
+    <p>Your sessions belong to this browser. Open this link on another device to run lectures from there too. Anyone who has the link can run sessions as you, so keep it to yourself.</p>
     <form id="linkForm">
       <input type="text" id="linkBox" readonly aria-label="Link for another device" style="font-size:13px">
       <button class="btn-outline" type="submit">Copy</button>

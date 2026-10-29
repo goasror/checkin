@@ -190,7 +190,7 @@
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
   }
 
-  // ---- home: start a session, earlier sessions ------------------------------
+  // ---- home: start a session, or download the one that just ended -----------
 
   async function showHome(justEnded) {
     clearTimeout(pollTimer);
@@ -207,67 +207,6 @@
     }
     $('#linkBox').value = `${location.origin}${location.pathname}#key=${hostKey}`;
     show('home');
-    try {
-      const res = await api('sessions');
-      const { sessions } = await res.json();
-      const list = $('#past');
-      list.textContent = '';
-      for (const s of sessions) {
-        const row = document.createElement('div');
-        row.className = 'row';
-        const box = document.createElement('div');
-        box.style.cssText = 'min-width:0;flex-grow:1';
-        const top = document.createElement('div');
-        top.className = 'name';
-        top.textContent = s.title || `${fmtDay(s.startedAt)}, ${fmtTime(s.startedAt)}`;
-        const sub = document.createElement('div');
-        sub.className = 'sub';
-        sub.textContent = `${s.title ? fmtDay(s.startedAt) + ' · ' : ''}${s.count} checked in`;
-        box.append(top, sub);
-        const label = s.title || fmtDay(s.startedAt);
-        const failed = () => { $('#homeErr').textContent = 'Download failed. Try again.'; };
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'icon-btn';
-        btn.setAttribute('aria-label', `Download PDF report for ${label}`);
-        btn.innerHTML = '<svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0f172a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7.5 11l4.5 4.5 4.5-4.5"/><path d="M5 19h14"/></svg>';
-        btn.addEventListener('click', () => download(s.id).catch(failed));
-
-        // Delete: first tap arms the button, second tap removes the session and its photos for good.
-        const del = document.createElement('button');
-        del.type = 'button';
-        del.className = 'icon-btn';
-        del.setAttribute('aria-label', `Delete ${label}`);
-        const trash = '<svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#b42318" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/></svg>';
-        del.innerHTML = trash;
-        let armed = 0;
-        del.addEventListener('click', async () => {
-          if (!armed) {
-            del.textContent = 'Delete?';
-            del.classList.add('armed');
-            armed = setTimeout(() => { armed = 0; del.innerHTML = trash; del.classList.remove('armed'); }, 4000);
-            return;
-          }
-          clearTimeout(armed);
-          del.disabled = true;
-          try {
-            const res = await post('delete', { sessionId: s.id });
-            if (!res.ok) throw new Error('delete');
-            row.remove();
-            $('#pastEmpty').hidden = list.children.length > 0;
-          } catch {
-            $('#homeErr').textContent = 'Could not delete. Try again.';
-            del.disabled = false;
-            armed = 0; del.innerHTML = trash; del.classList.remove('armed');
-          }
-        });
-        row.append(box, btn, del);
-        list.append(row);
-      }
-      $('#pastEmpty').hidden = sessions.length > 0;
-    } catch {
-      $('#homeErr').textContent = 'Could not load earlier sessions. Check your connection.';
-    }
   }
 
   $('#startForm').addEventListener('submit', async (e) => {
