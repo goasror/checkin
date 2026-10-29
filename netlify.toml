@@ -1,0 +1,24 @@
+[build]
+  publish = "public"
+  functions = "netlify/functions"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "no-referrer"
+    Permissions-Policy = "camera=(self), microphone=(), geolocation=()"
+
+# The QR libraries never change between deploys, so phones keep them for 30 days instead of asking
+# again on every visit (less bandwidth and fewer requests on the free plan). The app's own files are
+# left to revalidate, so a deploy reaches everyone at once.
+[[headers]]
+  for = "/vendor/*"
+  [headers.values]
+    Cache-Control = "public, max-age=2592000"
+
+[[redirects]]
+  from = "/host"
+  to = "/host.html"
+  status = 200
