@@ -29,9 +29,12 @@
   // not lose it. A session ends only when End is tapped.
   const SESSION = 'ci_session';
   let sessionId = '';
-  // Each call brings the next 30 s of codes, so the page rotates the QR itself and calls the server
-  // only this often (one function call per 20 s instead of per 5 s); the list and count refresh with it.
-  const POLL_MS = 20000;
+  // Each call brings the next 30 s of codes, so the page rotates the QR itself and calls the server only
+  // to refresh the list and count: every 5 s while check-ins are coming in (and when a session starts),
+  // every 20 s once it has been quiet for BUSY_MS. Fewer function calls, without a slow list in the rush.
+  const POLL_FAST_MS = 5000;
+  const POLL_SLOW_MS = 20000;
+  const BUSY_MS = 30000;
   const LAG_MS = 150; // show a new code a moment after the server switches, never before it
 
   let pollTimer = 0;
@@ -70,7 +73,7 @@
   const fmtDay = (ms) => { const d = new Date(ms); return `${two(d.getDate())}.${two(d.getMonth() + 1)}.${d.getFullYear()}`; };
   const DUP_FLAG = 'Bu ism bir neça marta işlatilgan';
   const END_LABEL = 'Tugatiş va yuklab oliş';
-  const DOWNLOAD_LABEL = 'PDF hisobotni yuklab oliş';
+  const DOWNLOAD_LABEL = 'PDF va Excelni yuklab oliş';
 
   // ---- live session ---------------------------------------------------------
 
@@ -200,7 +203,9 @@
     const gen = ++pollGen;
     let delay = 3000;
     try {
-      if (!local || local.sessionId !== sessionId) local = { sessionId, entries: [], names: new Map() };
+      if (!local || local.sessionId !== sessionId) {
+        local = { sessionId, entries: [], names: new Map(), lastNew: performance.now() };
+      }
       const res = await api(`state?s=${encodeURIComponent(sessionId)}&after=${encodeURIComponent(lastId())}`);
       if (!res.ok) throw new Error('state'); // a server error is not "no session": stay on the live screen
       const s = await res.json();
@@ -215,7 +220,9 @@
       if (document.body.dataset.screen !== 'live') show('live');
       renderLive(s);
       keepAwake(true);
-      delay = s.more ? 200 : POLL_MS; // catching up on a backlog: ask again soon
+      if (s.entries.length) local.lastNew = performance.now();
+      const busy = performance.now() - local.lastNew < BUSY_MS;
+      delay = s.more ? 200 : busy ? POLL_FAST_MS : POLL_SLOW_MS; // a backlog: ask again soon
     } catch {
       if (gen !== pollGen) return;
       setOnline(false);
@@ -245,7 +252,7 @@
       showHome(res.ok ? done : undefined); // not ok: it was already ended or deleted
       if (res.ok) $('#endedDownload').click(); // same path as the button: shows progress and errors
     } catch {
-      setOnline(false); // the session keeps running; the offline box offers a PDF of what is here
+      setOnline(false); // the session keeps running; the offline box offers the files of what is here
     }
     btn.disabled = false;
     disarm();
@@ -255,7 +262,7 @@
     if (!local) return;
     const btn = $('#offlineSave');
     btn.disabled = true;
-    await localFile().then(save, () => {});
+    await localFiles().then(save, () => {});
     btn.disabled = false;
   });
   function disarm() {
@@ -278,29 +285,36 @@
       else data = { ...page, entries: [...mine, ...page.entries] };
       after = page.next;
     } while (after);
-    return makeFile(data);
+    return makeFiles(data);
   }
 
-  // Without the server: a PDF of the check-ins this page holds, marked as possibly incomplete.
-  const localFile = () => makeFile({ ...local, note: 'aloqasiz saqlangan, tóliq bólmasligi mumkin' });
+  // Without the server: the files from the check-ins this page holds, marked as possibly incomplete.
+  const localFiles = () => makeFiles({ ...local, note: 'aloqasiz saqlangan, tóliq bólmasligi mumkin' });
 
-  // report.js draws the PDF here in the browser.
-  async function makeFile(data) {
-    const blob = await window.buildReport(data);
+  // Both are made here in the browser: the PDF with photos (report.js), the spreadsheet without (sheet.js).
+  async function makeFiles(data) {
     const d = new Date(data.startedAt);
     const day = `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
     const slug = (data.title || '').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 30);
-    return { blob, filename: `davomat-${day}${slug ? '-' + slug : ''}.pdf` };
+    const base = `davomat-${day}${slug ? '-' + slug : ''}`;
+    return [
+      { blob: await window.buildReport(data), filename: `${base}.pdf` },
+      { blob: window.buildSheet(data), filename: `${base}.xlsx` },
+    ];
   }
 
-  function save({ blob, filename }) {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = filename;
-    document.body.append(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  // A short gap between the files: some browsers drop a second download started in the same instant.
+  async function save(files) {
+    for (const [i, { blob, filename }] of files.entries()) {
+      if (i) await new Promise((r) => setTimeout(r, 400));
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    }
   }
 
   // ---- home: start a session, or download the one that just ended -----------
@@ -321,17 +335,17 @@
     if (justEnded) {
       const label = justEnded.title ? `${justEnded.title} · ` : '';
       $('#endedMeta').textContent = `${label}${fmtDay(justEnded.startedAt)} · ${justEnded.count} kişi qayd etildi`;
-      // Once the PDF is made, the server copy is deleted and this page keeps the file, so
+      // Once the files are made, the server copy is deleted and this page keeps them, so
       // "Download" still works afterwards. If the delete fails, the daily cleanup removes it.
-      let file = null;
-      // Leaving before the PDF is made loses access to it, so that needs a second tap.
+      let files = null;
+      // Leaving before the files are made loses access to them, so that needs a second tap.
       const again = $('#newSession');
       let armed = false;
       again.textContent = 'Yangi dars boşlaş';
       again.onclick = () => {
-        if (!file && !armed) {
+        if (!files && !armed) {
           armed = true;
-          again.textContent = 'PDF hali saqlanmadi. Davom etiş uçun yana bosing';
+          again.textContent = 'Fayllar hali saqlanmadi. Davom etiş uçun yana bosing';
           return;
         }
         showHome();
@@ -340,22 +354,22 @@
         const btn = $('#endedDownload');
         const text = btn.querySelector('span');
         btn.disabled = true;
-        text.textContent = 'PDF tayyorlanmoqda…';
+        text.textContent = 'Fayllar tayyorlanmoqda…';
         $('#homeErr').textContent = '';
         try {
-          if (!file) {
-            file = await makeReport(justEnded.sessionId);
+          if (!files) {
+            files = await makeReport(justEnded.sessionId);
             post('delete', { sessionId: justEnded.sessionId }).catch(() => {});
-            local = null; // the PDF has it all now
+            local = null; // the files have it all now
           }
-          save(file);
+          await save(files);
         } catch {
           // Offline after ending: save what this page has. The full report stays on the server.
           const mine = local && local.sessionId === justEnded.sessionId;
           $('#homeErr').textContent = mine
             ? 'Aloqa yóq. Bu sahifadagi qayd etilganlar saqlandi. Tóliq hisobot uçun aloqa tiklangaç yana bosing.'
             : 'Yuklab bólmadi. Qayta urinib kóring.';
-          if (mine) await localFile().then(save, () => {});
+          if (mine) await localFiles().then(save, () => {});
         }
         btn.disabled = false;
         text.textContent = DOWNLOAD_LABEL;

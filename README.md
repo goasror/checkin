@@ -40,14 +40,17 @@ Netlify Drop (dragging a folder into the dashboard) does not build functions. Us
 - A student opens the site and goes through three steps: name, front-camera selfie, scan the screen.
   Then a confirmation appears. **Check in someone else** starts again for the next person on the same phone.
 - The host sees the count and the latest check-ins with photos, and glances at them against the room.
-- The host page calls the server every 20 seconds and gets the next 30 seconds of codes each time, so it
-  rotates the QR itself. The count and the list of check-ins refresh every 20 seconds.
+- The host page gets the next 30 seconds of codes with every call, so it rotates the QR itself. It calls
+  the server every 5 seconds while check-ins are coming in (and for the first 30 seconds of a session),
+  and every 20 seconds once nobody has checked in for 30 seconds. The count and the list refresh with it.
 - If the host's connection drops, the live page stays up and offers **Save PDF of check-ins so far**,
   made from the check-ins the page already holds and marked as possibly incomplete. The QR keeps
   changing for up to 30 seconds, then fades: check-ins fail until the connection is back.
-- The host taps **End & download** (twice, so it cannot happen by accident). A PDF downloads: two columns,
-  each with photo, name and time. As soon as the PDF is made, the session and its photos are deleted from the server; the host page
-  keeps the file, so **Download PDF report** still works until the page is closed.
+- The host taps **End & download** (twice, so it cannot happen by accident). Two files download: a PDF
+  (two columns, each with photo, name and time) and an Excel file (`.xlsx`: number, name, time and the
+  repeated-name flag, no photos). Both are made in the host's browser. As soon as they are made, the
+  session and its photos are deleted from the server; the host page keeps the files, so the download
+  button still works until the page is closed. Browsers may ask once to allow several downloads.
 - A session ends only when the host taps **End**. As a safety net, a daily cleanup deletes sessions that
   were never ended (the tab was closed) a day after they started, and sessions that ended more than 7 days
   ago without a PDF being made.
@@ -101,5 +104,6 @@ public/vendor/                   qrcode-generator (MIT) and jsQR (Apache-2.0), c
 netlify/functions/api.mjs        all server logic (the PDF data, not the file)
 netlify/functions/cleanup.mjs    runs the daily cleanup from api.mjs
 public/report.js                 draws the PDF in the host's browser
+public/sheet.js                  writes the Excel file in the host's browser
 tests/api.test.mjs               tests
 ```

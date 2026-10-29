@@ -13,6 +13,7 @@
 <link rel="stylesheet" href="style.css">
 <script src="vendor/qrcode.js" defer></script>
 <script src="report.js" defer></script>
+<script src="sheet.js" defer></script>
 <script src="host.js" defer></script>
 </head>
 <body class="host-body">
@@ -45,9 +46,10 @@
       </div>
       <div class="offline" id="offline" role="alert" hidden>
         <p>Aloqa uzildi. Kod yana 30 soniyagaça almaşib turadi, sóng xiralaşadi va aloqa tiklanmaguança talabalar qayd etila olmaydi. Hozirgaça qayd etilganlar bu sahifada saqlanib turibdi.</p>
-        <button class="btn-outline wide" id="offlineSave" type="button">Hozirgaça qayd etilganlarni PDF qilib saqlaş</button>
+        <button class="btn-outline wide" id="offlineSave" type="button">Hozirgaça qayd etilganlarni PDF va Excel qilib saqlaş</button>
       </div>
       <h2 class="latest-h">Sónggi qayd etilganlar</h2>
+      <p class="latest-note">Yangi qayd etilganlar bu yerda 20 soniyagaça keçikib çiqadi.</p>
       <ul class="latest" id="latest"></ul>
       <p class="empty" id="latestEmpty">Hali heç kim qayd etilmadi.</p>
     </section>
@@ -62,9 +64,9 @@
     <div class="meta-line" id="endedMeta"></div>
     <button class="btn" id="endedDownload" type="button">
       <svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7.5 11l4.5 4.5 4.5-4.5"/><path d="M5 19h14"/></svg>
-      <span>PDF hisobotni yuklab oliş</span>
+      <span>PDF va Excelni yuklab oliş</span>
     </button>
-    <div class="file-hint">Qayd etilgan har bir kişining surati, ismi va vaqti</div>
+    <div class="file-hint">PDF: har bir kişining surati, ismi va vaqti. Excel: ismi va vaqti.</div>
     <button class="btn-outline wide" id="newSession" type="button">Yangi dars boşlaş</button>
   </div>
 
