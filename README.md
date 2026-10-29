@@ -70,8 +70,9 @@ The server stores only a hash of it. That means:
 
 - A photographed or screen-shared QR stops working after about 8 seconds (5 s plus a 3 s grace for scans in flight), and stops completely when the host ends the session.
 - Checking in for a friend puts the friend's own face (or yours) next to the name in a list the lecturer sees.
-- If the same name is used twice in a session, both check-ins are kept and flagged ("Same name used more
-  than once"), in the live list and in the PDF, so the faces can be compared.
+- If the same name is used twice in a session, both check-ins are kept and flagged ("Bu ism bir neça marta
+  işlatilgan") in the live list, the PDF and the Excel file. In the PDF and the Excel file they are placed
+  next to each other (where the first one was), so the faces can be compared.
 - It does **not** stop someone using a friend's name when nobody looks at the photos, or a friend in the
   room scanning live for someone absent. Spot-check the list.
 

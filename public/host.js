@@ -291,8 +291,21 @@
   // Without the server: the files from the check-ins this page holds, marked as possibly incomplete.
   const localFiles = () => makeFiles({ ...local, note: 'aloqasiz saqlangan, tóliq bólmasligi mumkin' });
 
+  // Check-ins under the same name go next to each other, so the faces can be compared side by side.
+  // Each group sits where its first check-in was; otherwise the order stays by time.
+  function groupSameNames(entries) {
+    const groups = new Map(); // keeps the order of first appearance
+    for (const e of entries) {
+      const k = nameKey(e.name);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(e);
+    }
+    return [...groups.values()].flat();
+  }
+
   // Both are made here in the browser: the PDF with photos (report.js), the spreadsheet without (sheet.js).
   async function makeFiles(data) {
+    data = { ...data, entries: groupSameNames(data.entries) };
     const d = new Date(data.startedAt);
     const day = `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
     const slug = (data.title || '').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 30);
