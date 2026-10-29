@@ -12,13 +12,12 @@
 //           POST /api/host/start { title? }      -> starts (or returns) this host's live session
 //           GET  /api/host/state?have=<ids>      -> count, latest check-ins, current QR token
 //           POST /api/host/end
-//           GET  /api/host/sessions              -> this host's finished sessions
-//           GET  /api/host/pdf?s=<id>&tz=<zone>  -> attendance report: photo, name and time
+//           GET  /api/host/report?s=<id>&after=<entry>  -> report data in pages of 50: name, time, photo
+//
+// The PDF itself is drawn by the host's browser (public/report.js) from this data, with the same
+// photos the host already sees on screen. The server never builds files.
 
 import { createHmac, createHash, randomBytes } from 'node:crypto';
-import { PDFDocument, rgb } from 'pdf-lib';
-import fontkit from '@pdf-lib/fontkit';
-import { REGULAR, BOLD } from './font-data.mjs';
 
 const WINDOW_MS = 10_000; // QR rotation
 const GRACE_MS = 3_000; // how long the previous code still works after a rotation
@@ -27,7 +26,7 @@ const MAX_TITLE = 60;
 const MAX_PHOTO = 40_000; // characters of the base64 data URL
 const LATEST = 12;
 const KEEP_MS = 7 * 24 * 3600 * 1000; // how long ended sessions (and their photos) are kept
-const BUILD = 'pdf-photos-3'; // printed in the PDF footer so you can tell which version is deployed
+const REPORT_PAGE = 50; // check-ins per report response, keeps each response well under 6 MB
 
 const json = (data, status = 200, headers = {}) =>
   new Response(JSON.stringify(data), {
@@ -181,154 +180,35 @@ export async function handle(req, { db, now = Date.now } = {}) {
     return json({ sessionId: done.id, title: done.title, startedAt: done.startedAt, endedAt: done.endedAt, count: done.count });
   }
 
-  if (action === 'delete' && method === 'POST') {
-    const body = await readJson(req);
-    const sid = String(body.sessionId ?? '');
-    if (!/^[A-Za-z0-9-]{1,40}$/.test(sid)) return fail(400, 'bad_session');
-    const session = await getSession(sid);
-    if (!session || session.hostId !== hostId) return fail(404, 'no_such_session'); // only your own
-    if (!session.endedAt) return fail(409, 'still_running'); // end it first
-    return json({ deleted: sid, removed: await removeSession(sid) });
-  }
-
-  if (action === 'sessions' && method === 'GET') {
-    const prefix = `h/${hostId}/`;
-    const { blobs } = await db.sessions.list({ prefix });
-    const ids = blobs.map((b) => b.key.slice(prefix.length)).sort().slice(-30);
-    const all = await Promise.all(ids.map(getSession));
-    const sessions = all
-      .filter((s) => s && s.endedAt)
-      .sort((a, b) => b.startedAt - a.startedAt)
-      .map(({ id, title, startedAt, endedAt, count }) => ({ id, title, startedAt, endedAt, count }));
-    return json({ sessions });
-  }
-
-  if (action === 'pdf' && method === 'GET') {
+  if (action === 'report' && method === 'GET') {
     const sid = url.searchParams.get('s') ?? '';
     if (!/^[A-Za-z0-9-]{1,40}$/.test(sid)) return fail(400, 'bad_session');
     const session = await getSession(sid);
     if (!session || session.hostId !== hostId) return fail(404, 'no_such_session'); // only the host who ran it
-    let tz = url.searchParams.get('tz') || 'UTC';
-    try {
-      new Intl.DateTimeFormat('en', { timeZone: tz });
-    } catch {
-      tz = 'UTC';
-    }
+    const after = url.searchParams.get('after') ?? '';
     const prefix = `${sid}/at/`;
     const { blobs } = await db.checkins.list({ prefix });
+    const ids = blobs.map((b) => b.key.slice(prefix.length)).sort().filter((id) => id > after);
+    const pageIds = ids.slice(0, REPORT_PAGE);
     const entries = (
-      await Promise.all(blobs.map((b) => b.key).sort().map((k) => db.checkins.get(k, { type: 'json' })))
+      await Promise.all(
+        pageIds.map(async (id) => {
+          const e = await db.checkins.get(prefix + id, { type: 'json' });
+          return e && { id, name: e.name, time: e.time, photo: e.photo };
+        }),
+      )
     ).filter(Boolean);
-    const count = await uniqueCount(sid);
-
-    const date = (ms) => new Date(ms).toLocaleString('sv-SE', { timeZone: tz });
-    const day = new Date(session.startedAt).toLocaleDateString('sv-SE', { timeZone: tz });
-    const slug = (session.title || '').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30);
-    const pdf = await buildPdf({
-      title: session.title || 'Attendance',
-      subtitle: `${date(session.startedAt)} (${tz})  ·  ${count} checked in`,
+    return json({
+      title: session.title,
+      startedAt: session.startedAt,
+      endedAt: session.endedAt,
+      count: await uniqueCount(sid),
       entries,
-      time: (ms) => new Date(ms).toLocaleTimeString('sv-SE', { timeZone: tz }),
-    });
-    return new Response(pdf, {
-      status: 200,
-      headers: {
-        'content-type': 'application/pdf',
-        'content-disposition': `attachment; filename="attendance-${day}${slug ? '-' + slug : ''}.pdf"`,
-        'cache-control': 'no-store',
-      },
+      next: ids.length > REPORT_PAGE ? pageIds[pageIds.length - 1] : null,
     });
   }
 
   return fail(404, 'not_found');
-}
-
-// ---- PDF report -------------------------------------------------------------
-// A4, two columns of cards: photo, name, time. Latin, Cyrillic and Greek names render;
-// other scripts show as "?".
-
-async function buildPdf({ title, subtitle, entries, time }) {
-  const pdf = await PDFDocument.create();
-  pdf.registerFontkit(fontkit);
-  const font = await pdf.embedFont(Buffer.from(REGULAR, 'base64'), { subset: true });
-  const bold = await pdf.embedFont(Buffer.from(BOLD, 'base64'), { subset: true });
-  const known = new Set(font.getCharacterSet());
-  const safe = (s) => [...String(s)].map((ch) => (known.has(ch.codePointAt(0)) ? ch : '?')).join('');
-  const fit = (text, f, size, maxW) => {
-    let s = safe(text);
-    if (f.widthOfTextAtSize(s, size) <= maxW) return s;
-    while (s.length > 1 && f.widthOfTextAtSize(s + '…', size) > maxW) s = s.slice(0, -1);
-    return s + '…';
-  };
-
-  const W = 595.28;
-  const H = 841.89;
-  const M = 40;
-  const GAP = 20;
-  const COL_W = (W - 2 * M - GAP) / 2;
-  const CELL_H = 60;
-  const PHOTO = 48;
-  const ink = rgb(0.059, 0.09, 0.165);
-  const muted = rgb(0.357, 0.392, 0.459);
-  const rule = rgb(0.875, 0.89, 0.925);
-  const warn = rgb(0.71, 0.27, 0.07);
-
-  const pages = [];
-  const newPage = () => {
-    const page = pdf.addPage([W, H]);
-    pages.push(page);
-    let top = H - M;
-    if (pages.length === 1) {
-      page.drawText(fit(title, bold, 22, W - 2 * M), { x: M, y: top - 22, size: 22, font: bold, color: ink });
-      page.drawText(safe(subtitle), { x: M, y: top - 44, size: 11, font, color: muted });
-      top -= 62;
-    } else {
-      page.drawText(fit(title, font, 10, W - 2 * M), { x: M, y: top - 10, size: 10, font, color: muted });
-      top -= 22;
-    }
-    page.drawLine({ start: { x: M, y: top }, end: { x: W - M, y: top }, thickness: 1, color: rule });
-    return { page, y: top - 14 };
-  };
-
-  // Flag every check-in that shares a name with another one, so both faces can be compared.
-  const seen = new Map();
-  for (const e of entries) seen.set(nameKey(e.name), (seen.get(nameKey(e.name)) ?? 0) + 1);
-
-  let { page, y } = newPage();
-  for (let i = 0; i < entries.length; i++) {
-    const col = i % 2;
-    if (col === 0 && i > 0) y -= CELL_H;
-    if (y - CELL_H < M + 24) ({ page, y } = newPage());
-    const e = entries[i];
-    const x = M + col * (COL_W + GAP);
-    const bottom = y - PHOTO;
-
-    page.drawText(String(i + 1), { x, y: bottom + PHOTO / 2 - 4, size: 9, font, color: muted });
-    try {
-      const raw = new Uint8Array(Buffer.from(e.photo.split(',')[1] ?? '', 'base64')); // copy: pdf-lib misreads Buffer's shared pool
-      const soi = raw.findIndex((b, k) => b === 0xff && raw[k + 1] === 0xd8); // tolerate stray leading bytes
-      const img = await pdf.embedJpg(soi > 0 ? raw.slice(soi) : raw);
-      page.drawImage(img, { x: x + 24, y: bottom, width: PHOTO, height: PHOTO });
-    } catch (err) {
-      console.error('pdf: photo could not be embedded for', i + 1, String(err?.message ?? err), 'len', e.photo?.length);
-      page.drawRectangle({ x: x + 24, y: bottom, width: PHOTO, height: PHOTO, color: rule });
-      page.drawText(safe(String(err?.message ?? err)).slice(0, 60), { x: x + 24 + PHOTO + 10, y: bottom + 2, size: 6, font, color: warn });
-    }
-    const tx = x + 24 + PHOTO + 10;
-    const maxW = COL_W - 24 - PHOTO - 10;
-    page.drawText(fit(e.name, bold, 12.5, maxW), { x: tx, y: bottom + PHOTO - 14, size: 12.5, font: bold, color: ink });
-    page.drawText(time(e.time), { x: tx, y: bottom + PHOTO - 30, size: 10.5, font, color: muted });
-    if (seen.get(nameKey(e.name)) > 1) {
-      page.drawText('Same name used more than once', { x: tx, y: bottom + PHOTO - 43, size: 8, font: bold, color: warn });
-    }
-  }
-
-  pages.forEach((p, n) => {
-    p.drawText(`Page ${n + 1} of ${pages.length}`, { x: W - M - 60, y: M - 12, size: 8.5, font, color: muted });
-    p.drawText(BUILD, { x: M, y: M - 12, size: 6, font, color: muted });
-  });
-  pdf.setTitle(safe(title));
-  return pdf.save();
 }
 
 // ---------------------------------------------------------------------------

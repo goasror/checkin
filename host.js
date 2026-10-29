@@ -163,7 +163,7 @@
       const done = await res.json();
       clearTimeout(pollTimer);
       await showHome(done);
-      if (done.sessionId) await download(done.sessionId).catch(() => {});
+      if (done.sessionId) $('#endedDownload').click(); // same path as the button: shows progress and errors
     } catch { /* offline: leave the session running */ }
     btn.disabled = false;
     disarm();
@@ -175,19 +175,30 @@
 
   // ---- download -------------------------------------------------------------
 
+  // The server sends the check-ins (in pages); report.js draws the PDF here in the browser.
   async function download(sessionId) {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    const res = await api(`pdf?s=${encodeURIComponent(sessionId)}&tz=${encodeURIComponent(tz)}`);
-    if (!res.ok) throw new Error('pdf');
-    const blob = await res.blob();
-    const match = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '');
+    let data = null;
+    let after = '';
+    do {
+      const res = await api(`report?s=${encodeURIComponent(sessionId)}&after=${encodeURIComponent(after)}`);
+      if (!res.ok) throw new Error('report');
+      const page = await res.json();
+      if (data) data.entries.push(...page.entries);
+      else data = page;
+      after = page.next;
+    } while (after);
+
+    const blob = await window.buildReport(data);
+    const d = new Date(data.startedAt);
+    const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const slug = (data.title || '').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 30);
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = match ? match[1] : 'attendance.pdf';
+    a.download = `attendance-${day}${slug ? '-' + slug : ''}.pdf`;
     document.body.append(a);
     a.click();
     a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
   }
 
   // ---- home: start a session, or download the one that just ended -----------
@@ -203,7 +214,16 @@
       const label = justEnded.title ? `${justEnded.title} · ` : '';
       $('#endedMeta').textContent = `${label}${fmtDay(justEnded.startedAt)} · ${justEnded.count} checked in`;
       const failed = () => { $('#homeErr').textContent = 'Download failed. Try again.'; };
-      $('#endedDownload').onclick = () => download(justEnded.sessionId).catch(failed);
+      $('#endedDownload').onclick = async () => {
+        const btn = $('#endedDownload');
+        const label = btn.querySelector('span');
+        btn.disabled = true;
+        label.textContent = 'Preparing PDF…';
+        $('#homeErr').textContent = '';
+        await download(justEnded.sessionId).catch(failed);
+        btn.disabled = false;
+        label.textContent = 'Download PDF report';
+      };
     }
     $('#linkBox').value = `${location.origin}${location.pathname}#key=${hostKey}`;
     show('home');

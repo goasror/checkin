@@ -61,7 +61,8 @@ The server stores only a hash of it. That means:
   If that becomes a problem, add Netlify's rate limiting or a simple invite code in `api.mjs`.
 - **Privacy.** A host sees the name and selfie of people who scanned their code, and the PDF contains them.
   Nothing is kept on the students' phones. Check what your institution requires before collecting photos.
-- **Names in the PDF** render in Latin, Cyrillic and Greek. Other scripts show as `?`.
+- **The PDF is made in the host's browser** (`public/report.js`), from the same photos the host page shows.
+  The server only sends the data. Names in any script come out right; the text in the PDF is not selectable.
 
 ## Develop
 
@@ -80,7 +81,7 @@ public/index.html, student.js    student pages: name, selfie, scan, done
 public/host.html,  host.js       host pages: live QR, end and download
 public/style.css                 shared styles
 public/vendor/                   qrcode-generator (MIT) and jsQR (Apache-2.0), copied from npm
-netlify/functions/api.mjs        all server logic, including the PDF report
-netlify/functions/font-data.mjs  DejaVu Sans subset used in the PDF (free licence, see DEJAVU-LICENSE.txt)
+netlify/functions/api.mjs        all server logic (the PDF data, not the file)
+public/report.js                 draws the PDF in the host's browser
 tests/api.test.mjs               tests
 ```

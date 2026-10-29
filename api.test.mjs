@@ -1,7 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
-import { PDFDocument } from 'pdf-lib';
 import { handle } from '../netlify/functions/api.mjs';
 
 // Minimal in-memory stand-in for a Netlify Blobs store.
@@ -24,7 +22,7 @@ class MemStore {
   }
 }
 
-// A real (tiny) JPEG, so the PDF test can embed it.
+// A real (tiny) JPEG.
 const JPEG_B64 =
   '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAAAP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==';
 const PHOTO = `data:image/jpeg;base64,${JPEG_B64}`;
@@ -50,7 +48,20 @@ function setup() {
     return { ...s, code: `${s.sessionId}.${s.token}` };
   };
   const checkin = (name, code, photo = PHOTO) => call('POST', '/api/checkin', { name, photo, code });
-  return { call, hostA: as(KEY_A), hostB: as(KEY_B), startAs, checkin, clock };
+  const report = async (hostCall, sid) => {
+    let all = null;
+    let after = '';
+    do {
+      const res = await hostCall('GET', `/api/host/report?s=${sid}&after=${after}`);
+      if (res.status !== 200) return { status: res.status };
+      const page = await res.json();
+      if (all) all.entries.push(...page.entries);
+      else all = { status: 200, ...page };
+      after = page.next;
+    } while (after);
+    return all;
+  };
+  return { call, hostA: as(KEY_A), hostB: as(KEY_B), startAs, checkin, clock, report };
 }
 
 test('host endpoints need a well-formed key, any key works', async () => {
@@ -125,86 +136,64 @@ test('hosts run side by side: lists, codes and downloads stay separate', async (
   assert.deepEqual(stateB.latest.map((p) => p.name), ['Alan Turing']);
 
   const endedB = await (await hostB('POST', '/api/host/end')).json();
-  assert.equal((await hostA('GET', `/api/host/pdf?s=${endedB.sessionId}`)).status, 404); // not A's session
-  assert.equal((await (await hostA('GET', '/api/host/sessions')).json()).sessions.length, 0);
-  assert.equal((await hostB('GET', `/api/host/pdf?s=${endedB.sessionId}`)).status, 200);
+  assert.equal((await hostA('GET', `/api/host/report?s=${endedB.sessionId}`)).status, 404); // not A's session
+  assert.equal((await hostB('GET', `/api/host/report?s=${endedB.sessionId}`)).status, 200);
   assert.equal((await (await hostA('GET', '/api/host/state')).json()).active, true); // A is unaffected
 });
 
-test('ending a session closes it and the PDF report is produced', async () => {
-  const { call, hostA, startAs, checkin } = setup();
+test('ending a session closes it and the report data has every check-in with its photo', async () => {
+  const { call, hostA, startAs, checkin, report, clock } = setup();
   const s = await startAs(hostA, 'Физика 101');
   await checkin('Анна Иванова', s.code);
+  clock.t += 1000;
   await checkin('Ada Lovelace', s.code);
+  clock.t += 1000;
   await checkin('Ada Lovelace', s.code); // duplicate on purpose
   const ended = await (await hostA('POST', '/api/host/end')).json();
   assert.equal(ended.count, 2);
   assert.equal((await (await hostA('GET', '/api/host/state')).json()).active, false);
   assert.equal((await checkin('Alan Turing', s.code)).status, 410); // session over
 
-  const res = await hostA('GET', `/api/host/pdf?s=${ended.sessionId}&tz=Europe/Berlin`);
-  assert.equal(res.status, 200);
-  assert.equal(res.headers.get('content-type'), 'application/pdf');
-  assert.match(res.headers.get('content-disposition'), /attendance-2026-10-26-101\.pdf/);
-  const bytes = new Uint8Array(await res.arrayBuffer());
-  assert.equal(String.fromCharCode(...bytes.slice(0, 5)), '%PDF-');
-  assert.ok(Buffer.from(bytes).toString('latin1').includes('/Subtype /Image'), 'photos must be embedded, not grey boxes');
-  if (process.env.WRITE_SAMPLE_PDF) writeFileSync(process.env.WRITE_SAMPLE_PDF, bytes);
-
-  const hist = await (await hostA('GET', '/api/host/sessions')).json();
-  assert.equal(hist.sessions.length, 1);
-  assert.equal(hist.sessions[0].count, 2);
-  assert.equal((await call('GET', '/api/host/pdf?s=../../x', null, { 'x-host-key': KEY_A })).status, 400);
+  const r = await report(hostA, ended.sessionId);
+  assert.equal(r.status, 200);
+  assert.equal(r.title, 'Физика 101');
+  assert.equal(r.count, 2);
+  assert.deepEqual(r.entries.map((e) => e.name), ['Анна Иванова', 'Ada Lovelace', 'Ada Lovelace']);
+  assert.ok(r.entries.every((e) => e.photo === PHOTO && typeof e.time === 'number'));
+  assert.equal((await call('GET', '/api/host/report?s=../../x', null, { 'x-host-key': KEY_A })).status, 400);
 });
 
-test('a large session produces a multi-page PDF', async () => {
-  const { hostA, startAs, checkin } = setup();
+test('a large session comes back complete, in pages', async () => {
+  const { hostA, startAs, checkin, clock, report } = setup();
   const s = await startAs(hostA, 'Big lecture');
-  for (let i = 1; i <= 120; i++) await checkin(`Student Number ${i}`, s.code);
+  for (let i = 1; i <= 130; i++) {
+    await checkin(`Student Number ${i}`, s.code);
+    if (i % 3 === 0) clock.t += 1; // several check-ins can share a millisecond
+  }
   const ended = await (await hostA('POST', '/api/host/end')).json();
-  assert.equal(ended.count, 120);
-  const res = await hostA('GET', `/api/host/pdf?s=${ended.sessionId}`);
-  const doc = await PDFDocument.load(await res.arrayBuffer());
-  assert.ok(doc.getPageCount() >= 4, `expected several pages, got ${doc.getPageCount()}`);
-});
-
-test('a host can delete their own ended sessions, and only those', async () => {
-  const { hostA, hostB, startAs, checkin, clock } = setup();
-  const s = await startAs(hostA, 'Old lecture');
-  await checkin('Ada Lovelace', s.code);
-  assert.equal((await hostA('POST', '/api/host/delete', { sessionId: s.sessionId })).status, 409); // still running
-  const ended = await (await hostA('POST', '/api/host/end')).json();
-  assert.equal((await hostB('POST', '/api/host/delete', { sessionId: ended.sessionId })).status, 404); // not B's
-  assert.equal((await hostA('POST', '/api/host/delete', { sessionId: '../x' })).status, 400);
-  clock.t += 1000;
-  const keep = await startAs(hostA, 'Keep me');
-  await checkin('Alan Turing', keep.code);
-  await hostA('POST', '/api/host/end');
-
-  const res = await hostA('POST', '/api/host/delete', { sessionId: ended.sessionId });
-  assert.equal(res.status, 200);
-  assert.equal((await res.json()).removed, 2); // the check-in and its name marker
-  assert.equal((await hostA('GET', `/api/host/pdf?s=${ended.sessionId}`)).status, 404);
-  const list = (await (await hostA('GET', '/api/host/sessions')).json()).sessions;
-  assert.deepEqual(list.map((x) => x.title), ['Keep me']); // the other session is untouched
-  assert.equal((await hostA('GET', `/api/host/pdf?s=${keep.sessionId}`)).status, 200);
+  assert.equal(ended.count, 130);
+  const first = await (await hostA('GET', `/api/host/report?s=${ended.sessionId}`)).json();
+  assert.equal(first.entries.length, 50);
+  assert.ok(first.next);
+  const r = await report(hostA, ended.sessionId);
+  assert.equal(r.entries.length, 130);
+  assert.equal(new Set(r.entries.map((e) => e.id)).size, 130); // no repeats, nothing missing
 });
 
 test('sessions that ended more than a week ago are purged when the host starts a new one', async () => {
-  const { hostA, hostB, startAs, checkin, clock, call } = setup();
+  const { hostA, hostB, startAs, checkin, clock, report } = setup();
   const old = await startAs(hostA, 'Last month');
   await checkin('Ada Lovelace', old.code);
   const endedOld = await (await hostA('POST', '/api/host/end')).json();
   const other = await startAs(hostB, 'Other host');
   await checkin('Alan Turing', other.code);
-  await hostB('POST', '/api/host/end');
+  const endedOther = await (await hostB('POST', '/api/host/end')).json();
   clock.t += 2 * 24 * 3600 * 1000;
   await hostA('POST', '/api/host/start', { title: 'Two days later' });
-  assert.equal((await hostA('GET', `/api/host/pdf?s=${endedOld.sessionId}`)).status, 200); // still kept
+  assert.equal((await report(hostA, endedOld.sessionId)).status, 200); // still kept
   await hostA('POST', '/api/host/end');
   clock.t += 8 * 24 * 3600 * 1000;
   await hostA('POST', '/api/host/start', { title: 'Next week' });
-  assert.equal((await hostA('GET', `/api/host/pdf?s=${endedOld.sessionId}`)).status, 404); // purged
-  assert.equal((await hostB('GET', '/api/host/sessions')).status, 200);
-  assert.equal((await (await hostB('GET', '/api/host/sessions')).json()).sessions.length, 1); // other host untouched
+  assert.equal((await report(hostA, endedOld.sessionId)).status, 404); // purged
+  assert.equal((await report(hostB, endedOther.sessionId)).entries.length, 1); // other host untouched
 });
