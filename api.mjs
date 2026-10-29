@@ -26,6 +26,7 @@ const MAX_NAME = 80;
 const MAX_TITLE = 60;
 const MAX_PHOTO = 40_000; // characters of the base64 data URL
 const LATEST = 12;
+const BUILD = 'pdf-photos-3'; // printed in the PDF footer so you can tell which version is deployed
 
 const json = (data, status = 200, headers = {}) =>
   new Response(JSON.stringify(data), {
@@ -284,6 +285,7 @@ async function buildPdf({ title, subtitle, entries, time }) {
     } catch (err) {
       console.error('pdf: photo could not be embedded for', i + 1, String(err?.message ?? err), 'len', e.photo?.length);
       page.drawRectangle({ x: x + 24, y: bottom, width: PHOTO, height: PHOTO, color: rule });
+      page.drawText(safe(String(err?.message ?? err)).slice(0, 60), { x: x + 24 + PHOTO + 10, y: bottom + 2, size: 6, font, color: warn });
     }
     const tx = x + 24 + PHOTO + 10;
     const maxW = COL_W - 24 - PHOTO - 10;
@@ -296,6 +298,7 @@ async function buildPdf({ title, subtitle, entries, time }) {
 
   pages.forEach((p, n) => {
     p.drawText(`Page ${n + 1} of ${pages.length}`, { x: W - M - 60, y: M - 12, size: 8.5, font, color: muted });
+    p.drawText(BUILD, { x: M, y: M - 12, size: 6, font, color: muted });
   });
   pdf.setTitle(safe(title));
   return pdf.save();
