@@ -7,13 +7,14 @@
   const $ = (sel) => document.querySelector(sel);
   const screens = [...document.querySelectorAll('main[data-screen]')];
 
+  // The interface is in Uzbek, in the reformed Latin alphabet: ş (sh), ç (ch), ó (oʻ), ǵ (gʻ).
   const MSG = {
-    bad_name: 'Enter your full name.',
-    bad_photo: 'The selfie did not upload. Take it again.',
-    expired: 'That code expired. Scan the screen again.',
-    wrong_session: 'That is not a current check-in code.',
-    ended: 'That session has ended.',
-    network: 'No connection. Check your internet and try again.',
+    bad_name: 'Ism va familiyangizni kiriting.',
+    bad_photo: 'Selfi yuklanmadi. Qaytadan oling.',
+    expired: 'Kod eskirdi. Ekranni qayta skanerlang.',
+    wrong_session: 'Bu amaldagi davomat kodi emas.',
+    ended: 'Bu dars tugagan.',
+    network: 'Aloqa yóq. Internetni tekşirib, qayta urinib kóring.',
   };
 
   function show(name) {
@@ -85,7 +86,7 @@
   async function showSelfie(message = '') {
     selfieErr.textContent = message;
     shoot.disabled = true;
-    camNote.textContent = 'Starting the front camera…';
+    camNote.textContent = 'Old kamera yoqilmoqda…';
     show('selfie');
     try {
       selfieStream = await navigator.mediaDevices.getUserMedia({
@@ -94,11 +95,11 @@
       });
       selfieVideo.srcObject = selfieStream;
       await selfieVideo.play();
-      camNote.textContent = 'Front camera is on';
+      camNote.textContent = 'Old kamera yoqilgan';
       shoot.disabled = false;
     } catch {
       camNote.textContent = '';
-      selfieErr.textContent = 'Allow camera access in your browser to take the selfie, then reload this page.';
+      selfieErr.textContent = 'Selfi uçun brauzerda kameraga ruxsat bering, sóng sahifani qayta yuklang.';
     }
   }
 
@@ -153,7 +154,7 @@
         scanVideo.srcObject = scanStream;
         await scanVideo.play();
       } catch {
-        scanMsg.textContent = 'Allow camera access in your browser to scan the code, then reload this page.';
+        scanMsg.textContent = 'Kodni skanerlaş uçun brauzerda kameraga ruxsat bering, sóng sahifani qayta yuklang.';
         return;
       }
     }
@@ -195,7 +196,7 @@
   async function checkIn(code) {
     if (busy) return;
     busy = true;
-    scanMsg.textContent = 'Checking in…';
+    scanMsg.textContent = 'Qayd etilmoqda…';
     const res = await post('checkin', { name: draft.name, photo: draft.photo, code });
     busy = false;
     if (res.ok) return showDone(res.data);
@@ -205,8 +206,8 @@
     const err = res.data.error;
     if (err === 'bad_name') { stopScan(); return showName(MSG.bad_name); }
     if (err === 'bad_photo') { stopScan(); return showSelfie(MSG.bad_photo); }
-    if (err === 'ended') return showWait(MSG.ended, 'Session ended');
-    return startScan(MSG[err] || 'Could not check in. Try again.');
+    if (err === 'ended') return showWait(MSG.ended, 'Dars tugadi');
+    return startScan(MSG[err] || 'Qayd etib bólmadi. Qayta urinib kóring.');
   }
 
   // ---- done / wait ------------------------------------------------------------
@@ -216,7 +217,9 @@
     draft = { name: '', photo: '' }; // forget everything: the next person starts from scratch
     $('#scanThumb').removeAttribute('src');
     $('#doneName').textContent = name;
-    $('#doneTime').textContent = 'Today at ' + new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    // numeric: the browser's Uzbek date words use the old spelling, and some browsers have none
+    const d = new Date(time);
+    $('#doneTime').textContent = `Bugun, soat ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
     show('done');
   }
 

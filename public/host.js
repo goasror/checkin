@@ -63,8 +63,14 @@
     });
   const post = (path, body) => api(path, { method: 'POST', body: JSON.stringify(body || {}) });
 
-  const fmtTime = (ms) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const fmtDay = (ms) => new Date(ms).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+  // The interface is in Uzbek, in the reformed Latin alphabet: ş (sh), ç (ch), ó (oʻ), ǵ (gʻ). Dates
+  // are numeric: the browser's Uzbek month and weekday names use the old spelling, if it has any.
+  const two = (n) => String(n).padStart(2, '0');
+  const fmtTime = (ms) => { const d = new Date(ms); return `${two(d.getHours())}:${two(d.getMinutes())}`; };
+  const fmtDay = (ms) => { const d = new Date(ms); return `${two(d.getDate())}.${two(d.getMonth() + 1)}.${d.getFullYear()}`; };
+  const DUP_FLAG = 'Bu ism bir neça marta işlatilgan';
+  const END_LABEL = 'Tugatiş va yuklab oliş';
+  const DOWNLOAD_LABEL = 'PDF hisobotni yuklab oliş';
 
   // ---- live session ---------------------------------------------------------
 
@@ -140,7 +146,7 @@
       if (isDup(p)) {
         const flag = document.createElement('div');
         flag.className = 'flag';
-        flag.textContent = 'Same name used more than once';
+        flag.textContent = DUP_FLAG;
         box.append(flag);
       }
       li.append(img, box);
@@ -150,8 +156,8 @@
   }
 
   function renderLive(s) {
-    $('#liveTitle').textContent = s.title || 'Scan to check in';
-    $('#liveSince').textContent = `Started ${fmtTime(s.startedAt)}`;
+    $('#liveTitle').textContent = s.title || 'Qayd etiliş uçun skanerlang';
+    $('#liveSince').textContent = `Boşlandi: ${fmtTime(s.startedAt)}`;
     $('#count').textContent = s.count;
     $('#joinUrl').textContent = location.host + '/';
     setCodes(s.sessionId, s.tokens, s.msLeft);
@@ -160,7 +166,7 @@
 
   function setOnline(ok) {
     $('#livePill').classList.toggle('off', !ok);
-    $('#liveText').textContent = ok ? 'Live' : 'Offline';
+    $('#liveText').textContent = ok ? 'Jonli' : 'Aloqa yóq';
     $('#offline').hidden = ok;
   }
 
@@ -215,7 +221,7 @@
       setOnline(false);
       if (!document.body.dataset.screen) {
         show('home');
-        $('#homeErr').textContent = 'Cannot reach the server. Check your connection and reload.';
+        $('#homeErr').textContent = 'Serverga ulanib bólmadi. Aloqani tekşirib, sahifani qayta yuklang.';
       }
     }
     pollTimer = setTimeout(poll, delay);
@@ -227,7 +233,7 @@
     const btn = $('#endBtn');
     if (!btn.classList.contains('armed')) {
       btn.classList.add('armed');
-      $('#endLabel').textContent = 'Tap again to end';
+      $('#endLabel').textContent = 'Tugatiş uçun yana bosing';
       armTimer = setTimeout(disarm, 4000);
       return;
     }
@@ -254,7 +260,7 @@
   });
   function disarm() {
     $('#endBtn').classList.remove('armed');
-    $('#endLabel').textContent = 'End & download';
+    $('#endLabel').textContent = END_LABEL;
   }
 
   // ---- download -------------------------------------------------------------
@@ -276,15 +282,15 @@
   }
 
   // Without the server: a PDF of the check-ins this page holds, marked as possibly incomplete.
-  const localFile = () => makeFile({ ...local, note: 'saved offline, may be incomplete' });
+  const localFile = () => makeFile({ ...local, note: 'aloqasiz saqlangan, tóliq bólmasligi mumkin' });
 
   // report.js draws the PDF here in the browser.
   async function makeFile(data) {
     const blob = await window.buildReport(data);
     const d = new Date(data.startedAt);
-    const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const day = `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
     const slug = (data.title || '').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 30);
-    return { blob, filename: `attendance-${day}${slug ? '-' + slug : ''}.pdf` };
+    return { blob, filename: `davomat-${day}${slug ? '-' + slug : ''}.pdf` };
   }
 
   function save({ blob, filename }) {
@@ -314,18 +320,18 @@
     $('#startBlock').hidden = !!justEnded;
     if (justEnded) {
       const label = justEnded.title ? `${justEnded.title} · ` : '';
-      $('#endedMeta').textContent = `${label}${fmtDay(justEnded.startedAt)} · ${justEnded.count} checked in`;
+      $('#endedMeta').textContent = `${label}${fmtDay(justEnded.startedAt)} · ${justEnded.count} kişi qayd etildi`;
       // Once the PDF is made, the server copy is deleted and this page keeps the file, so
       // "Download" still works afterwards. If the delete fails, the daily cleanup removes it.
       let file = null;
       // Leaving before the PDF is made loses access to it, so that needs a second tap.
       const again = $('#newSession');
       let armed = false;
-      again.textContent = 'Start another session';
+      again.textContent = 'Yangi dars boşlaş';
       again.onclick = () => {
         if (!file && !armed) {
           armed = true;
-          again.textContent = 'PDF not saved yet. Tap again to continue';
+          again.textContent = 'PDF hali saqlanmadi. Davom etiş uçun yana bosing';
           return;
         }
         showHome();
@@ -334,7 +340,7 @@
         const btn = $('#endedDownload');
         const text = btn.querySelector('span');
         btn.disabled = true;
-        text.textContent = 'Preparing PDF…';
+        text.textContent = 'PDF tayyorlanmoqda…';
         $('#homeErr').textContent = '';
         try {
           if (!file) {
@@ -347,12 +353,12 @@
           // Offline after ending: save what this page has. The full report stays on the server.
           const mine = local && local.sessionId === justEnded.sessionId;
           $('#homeErr').textContent = mine
-            ? 'No connection. Saved the check-ins this page had. Tap again when you are back online for the full report.'
-            : 'Download failed. Try again.';
+            ? 'Aloqa yóq. Bu sahifadagi qayd etilganlar saqlandi. Tóliq hisobot uçun aloqa tiklangaç yana bosing.'
+            : 'Yuklab bólmadi. Qayta urinib kóring.';
           if (mine) await localFile().then(save, () => {});
         }
         btn.disabled = false;
-        text.textContent = 'Download PDF report';
+        text.textContent = DOWNLOAD_LABEL;
       };
     }
     show('home');
@@ -371,7 +377,7 @@
       $('#title').value = '';
       poll();
     } catch {
-      $('#homeErr').textContent = 'Could not start the session. Check your connection and try again.';
+      $('#homeErr').textContent = 'Darsni boşlab bólmadi. Aloqani tekşirib, qayta urinib kóring.';
     }
     btn.disabled = false;
   });

@@ -18,6 +18,10 @@ check-ins in Netlify Blobs, and a scheduled function (`netlify/functions/cleanup
 sessions once a day. GitHub Pages cannot run it, because it has nowhere to store anything. Push the
 repo to GitHub and let Netlify deploy it from there.
 
+The pages and the PDF are in Uzbek, written in the reformed Latin alphabet: **ş** for sh, **ç** for ch,
+**ó** for oʻ and **ǵ** for gʻ. Dates and times are shown as numbers (29.10.2026, 09:15), because
+browsers' built-in Uzbek month and weekday names use the old spelling.
+
 ## Deploy
 
 1. Push this folder to a GitHub repository.
