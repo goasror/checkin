@@ -191,13 +191,6 @@ body[data-screen='scan'] { background: #0b1020; }
 .host .btn { margin-top: 28px; }
 .host .file-hint { margin-top: 10px; text-align: center; font-size: 13px; font-weight: 600; color: var(--muted); }
 .host #newSession { margin-top: 20px; }
-details.admin { margin-top: 28px; border-top: 1.5px solid #e3e7ef; padding-top: 16px; }
-details.admin summary { cursor: pointer; font-size: 14px; font-weight: 700; color: var(--muted); }
-details.admin form { margin-top: 12px; display: flex; gap: 8px; }
-details.admin input { margin-top: 0; height: 48px; font-size: 16px; }
-details.admin .btn-outline { flex-shrink: 0; }
-details.admin p { margin: 10px 0 0; font-size: 13px; line-height: 1.4; color: var(--muted); }
-.status { min-height: 20px; margin: 8px 0 0; font-size: 14px; font-weight: 600; color: var(--ink-2); }
 
 @media (min-width: 900px) {
   .host { max-width: 1280px; padding: 40px; }

@@ -5,23 +5,17 @@
   const screens = [...document.querySelectorAll('main[data-screen]')];
   const KEY = 'ci_host_key';
 
-  const ls = {
-    get: (k) => { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
-    set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
-  };
+  const store = (area) => ({
+    get: (k) => { try { return area().getItem(k) || ''; } catch { return ''; } },
+    set: (k, v) => { try { area().setItem(k, v); } catch { /* private mode */ } },
+    remove: (k) => { try { area().removeItem(k); } catch { /* private mode */ } },
+  });
+  const ls = store(() => localStorage);
+  const ss = store(() => sessionStorage); // per tab, survives a reload of that tab
 
   // ---- host identity: a random key kept in this browser ---------------------
-  // Opening host.html#key=... on another device adopts the same key.
 
-  let hostKey = '';
-  const fromHash = /^#key=([A-Za-z0-9_-]{32,64})$/.exec(location.hash);
-  if (fromHash) {
-    hostKey = fromHash[1];
-    ls.set(KEY, hostKey);
-    history.replaceState(null, '', location.pathname);
-  } else {
-    hostKey = ls.get(KEY);
-  }
+  let hostKey = ls.get(KEY);
   if (!/^[A-Za-z0-9_-]{32,64}$/.test(hostKey)) {
     const bytes = crypto.getRandomValues(new Uint8Array(24));
     hostKey = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -29,8 +23,12 @@
   }
 
   const WINDOW_MS = 5000; // QR rotation, as in api.mjs
-  const MAX_SESSION_MS = 3 * 3600 * 1000; // a session left running this long is deleted, as in api.mjs
   const LATEST = 12; // check-ins shown in the live list
+  // This page's live session. Every visit to /host asks for a name and starts its own, so several
+  // can run at once; only a reload of the same tab picks it up again, so a refresh mid-lecture does
+  // not lose it. A session ends only when End is tapped.
+  const SESSION = 'ci_session';
+  let sessionId = '';
   // Each call brings the next 30 s of codes, so the page rotates the QR itself and calls the server
   // only this often (one function call per 20 s instead of per 5 s); the list and count refresh with it.
   const POLL_MS = 20000;
@@ -93,10 +91,10 @@
   }
 
   // tokens[0] is the current code, good for msLeft more; each next one for WINDOW_MS after that.
-  function setCodes(sessionId, tokens, msLeft) {
+  function setCodes(sid, tokens, msLeft) {
     let until = performance.now() + msLeft + LAG_MS;
     codes = tokens.map((token, i) => ({ token, until: i ? (until += WINDOW_MS) : until }));
-    codeSession = sessionId;
+    codeSession = sid;
     rotate();
   }
 
@@ -153,8 +151,7 @@
 
   function renderLive(s) {
     $('#liveTitle').textContent = s.title || 'Scan to check in';
-    // so a session left running from an earlier lecture is easy to spot
-    $('#liveSince').textContent = `Started ${fmtTime(s.startedAt)} · ends on its own at ${fmtTime(s.startedAt + MAX_SESSION_MS)}`;
+    $('#liveSince').textContent = `Started ${fmtTime(s.startedAt)}`;
     $('#count').textContent = s.count;
     $('#joinUrl').textContent = location.host + '/';
     setCodes(s.sessionId, s.tokens, s.msLeft);
@@ -197,13 +194,12 @@
     const gen = ++pollGen;
     let delay = 3000;
     try {
-      const sid = local ? local.sessionId : '';
-      const res = await api(`state?s=${encodeURIComponent(sid)}&after=${encodeURIComponent(lastId())}`);
+      if (!local || local.sessionId !== sessionId) local = { sessionId, entries: [], names: new Map() };
+      const res = await api(`state?s=${encodeURIComponent(sessionId)}&after=${encodeURIComponent(lastId())}`);
       if (!res.ok) throw new Error('state'); // a server error is not "no session": stay on the live screen
       const s = await res.json();
       if (gen !== pollGen) return;
-      if (!s.active) return showHome();
-      if (!local || local.sessionId !== s.sessionId) local = { sessionId: s.sessionId, entries: [], names: new Map() };
+      if (!s.active) return showHome(); // ended, or deleted by the cleanup
       Object.assign(local, { title: s.title, startedAt: s.startedAt, count: s.count });
       for (const p of s.entries) {
         local.entries.push(p);
@@ -238,9 +234,9 @@
     clearTimeout(armTimer);
     btn.disabled = true;
     try {
-      const res = await post('end');
+      const res = await post('end', { sessionId });
       const done = await res.json();
-      showHome(res.ok ? done : undefined); // not ok: it was already ended, e.g. from another device
+      showHome(res.ok ? done : undefined); // not ok: it was already ended or deleted
       if (res.ok) $('#endedDownload').click(); // same path as the button: shows progress and errors
     } catch {
       setOnline(false); // the session keeps running; the offline box offers a PDF of what is here
@@ -264,12 +260,12 @@
   // ---- download -------------------------------------------------------------
 
   // The page already holds the check-ins it polled; the server sends only the rest (in pages).
-  async function makeReport(sessionId) {
-    const mine = local && local.sessionId === sessionId ? local.entries : [];
+  async function makeReport(sid) {
+    const mine = local && local.sessionId === sid ? local.entries : [];
     let data = null;
     let after = mine.length ? mine[mine.length - 1].id : '';
     do {
-      const res = await api(`report?s=${encodeURIComponent(sessionId)}&after=${encodeURIComponent(after)}`);
+      const res = await api(`report?s=${encodeURIComponent(sid)}&after=${encodeURIComponent(after)}`);
       if (!res.ok) throw new Error('report');
       const page = await res.json();
       if (data) data.entries.push(...page.entries);
@@ -307,6 +303,8 @@
     clearTimeout(pollTimer);
     pollGen++;
     keepAwake(false);
+    sessionId = '';
+    ss.remove(SESSION);
     clearTimeout(rotateTimer);
     codes = [];
     lastToken = '';
@@ -357,7 +355,6 @@
         text.textContent = 'Download PDF report';
       };
     }
-    $('#linkBox').value = `${location.origin}${location.pathname}#key=${hostKey}`;
     show('home');
   }
 
@@ -369,6 +366,8 @@
     try {
       const res = await post('start', { title: $('#title').value });
       if (!res.ok) throw new Error('start');
+      sessionId = (await res.json()).sessionId;
+      ss.set(SESSION, sessionId);
       $('#title').value = '';
       poll();
     } catch {
@@ -377,23 +376,13 @@
     btn.disabled = false;
   });
 
-  // ---- use on another device --------------------------------------------------
-
-  $('#linkForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const box = $('#linkBox');
-    box.select();
-    try {
-      await navigator.clipboard.writeText(box.value);
-      $('#linkStatus').textContent = 'Link copied.';
-    } catch {
-      $('#linkStatus').textContent = 'Press and hold the link to copy it.';
-    }
-  });
-
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && document.body.dataset.screen === 'live') poll();
   });
 
-  poll();
+  // A reload of this tab carries on with its session; any other visit asks for a name.
+  const nav = performance.getEntriesByType('navigation')[0];
+  sessionId = nav && nav.type === 'reload' ? ss.get(SESSION) : '';
+  if (sessionId) poll();
+  else showHome();
 })();

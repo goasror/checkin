@@ -8,9 +8,10 @@ the host taps **End & download** and gets a PDF with a photo, name and time for 
 who has no smartphone can borrow a friend's: each person goes through name, selfie and scan on it. The
 host compares the names with the faces.
 
-**Anyone can be a host, and many hosts can run at the same time.** There is no passcode. Each session has its
-own secret, so a student only appears in the list of the host whose QR they scanned, and a host can only see
-and download their own sessions.
+**Anyone can be a host, and any number of lessons can run at the same time.** There is no passcode. Every
+visit to `/host` asks for a session name and starts its own session, even several from the same browser.
+Each session has its own secret, so a student only appears in the list of the session whose QR they
+scanned, and a host can only see and download their own sessions.
 
 It is a static site (`public/`) plus one Netlify Function (`netlify/functions/api.mjs`) that stores
 check-ins in Netlify Blobs, and a scheduled function (`netlify/functions/cleanup.mjs`) that deletes old
@@ -22,15 +23,16 @@ repo to GitHub and let Netlify deploy it from there.
 1. Push this folder to a GitHub repository.
 2. In Netlify: **Add new site, Import an existing project**, pick the repository. The build settings
    come from `netlify.toml`, so there is nothing to fill in and no environment variables are needed.
-3. Open `https://YOUR-SITE.netlify.app/host.html` on the host's phone or laptop and tap **Start session**.
+3. Open `https://YOUR-SITE.netlify.app/host` on the host's phone or laptop and tap **Start session**.
 
 Netlify Drop (dragging a folder into the dashboard) does not build functions. Use Git, or the CLI:
 `npx netlify-cli deploy --prod`.
 
 ## How a lecture goes
 
-- The host opens `/host.html`, optionally types a session name, and taps **Start session**.
-  Show the QR to the room (the page switches to a two-column layout on a projector).
+- The host opens `/host`, types a session name (optional), and taps **Start session**. Show the QR to
+  the room (the page switches to a two-column layout on a projector). Opening `/host` again, in the same
+  or another tab or browser, starts another session; reloading the same tab carries on with its session.
 - A student opens the site and goes through three steps: name, front-camera selfie, scan the screen.
   Then a confirmation appears. **Check in someone else** starts again for the next person on the same phone.
 - The host sees the count and the latest check-ins with photos, and glances at them against the room.
@@ -41,23 +43,21 @@ Netlify Drop (dragging a folder into the dashboard) does not build functions. Us
   changing for up to 30 seconds, then fades: check-ins fail until the connection is back.
 - The host taps **End & download** (twice, so it cannot happen by accident). A PDF downloads: two columns,
   each with photo, name and time. As soon as the PDF is made, the session and its photos are deleted from the server; the host page
-  keeps the file, so **Download PDF report** still works until the page is closed. As a safety net, a
-  daily cleanup deletes sessions that ended more than 7 days ago without a PDF being made.
-- Every lecture is its own session. One left running (End never tapped) is deleted with its check-ins 3
-  hours after it started, so the next lecture starts clean instead of adding to it. The live screen shows
-  when the session started and when it ends on its own.
+  keeps the file, so **Download PDF report** still works until the page is closed.
+- A session ends only when the host taps **End**. As a safety net, a daily cleanup deletes sessions that
+  were never ended (the tab was closed) a day after they started, and sessions that ended more than 7 days
+  ago without a PDF being made.
 - While a session is live, the host page keeps the screen awake (where the browser allows it), so the QR
   does not disappear when a phone or laptop would otherwise sleep.
 
 ## How hosts are identified
 
-A host is a random key the browser creates the first time `/host.html` opens and keeps in local storage.
+A host is a random key the browser creates the first time `/host` opens and keeps in local storage.
 The server stores only a hash of it. That means:
 
 - No sign-up, no passcode. Opening the page is enough.
-- Sessions belong to that browser. Clearing the browser data loses access to a session you have not downloaded yet.
-- The host page has **Use this on another device**: a link containing the key. Anyone who has that link
-  can run sessions and download reports as the host, so treat it like a password.
+- A session belongs to the tab that started it. Closing that tab before downloading the PDF loses access
+  to it; the daily cleanup then deletes it.
 
 ## What it guards against, and what it does not
 

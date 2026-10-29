@@ -4,15 +4,16 @@
 // code from the host's screen, so the host gets a new name + face + time each time.
 //
 // Anyone can host. A host is just a random key kept in their browser (sent as x-host-key); the
-// server only stores a hash of it. Every session has its own secret, so many hosts can run sessions
-// at the same time, and a student only appears in the list of the host whose QR they scanned.
+// server only stores a hash of it. Every session has its own secret, so any number of sessions can run
+// at the same time (each host page starts its own), and a student only appears in the list of the
+// session whose QR they scanned.
 //
 // Student:  POST /api/checkin  { name, photo, code }  -> { name, time, dup }
 // Host (x-host-key header):
-//           POST /api/host/start { title? }      -> starts (or returns) this host's live session
+//           POST /api/host/start { title? }      -> starts a new session
 //           GET  /api/host/state?s=<id>&after=<entry> -> count, check-ins newer than <entry> (oldest
 //                                                   first, up to 50), the next 6 QR tokens
-//           POST /api/host/end
+//           POST /api/host/end { sessionId }
 //           GET  /api/host/report?s=<id>&after=<entry>  -> report data in pages of 50: name, time, photo
 //           POST /api/host/delete { sessionId }  -> removes an ended session and its photos (PDF is made)
 //
@@ -28,10 +29,9 @@ const MAX_NAME = 80;
 const MAX_TITLE = 60;
 const MAX_PHOTO = 40_000; // characters of the base64 data URL
 const KEEP_MS = 7 * 24 * 3600 * 1000; // how long an ended session whose PDF was never made is kept
-// Lectures are separate (they run 1-2 h): a session left running longer than this (End never tapped)
-// is deleted with its check-ins, so it is never carried into the next lecture.
-const MAX_SESSION_MS = 3 * 3600 * 1000;
-const isStale = (s, t) => !s.endedAt && t - s.startedAt > MAX_SESSION_MS;
+// Sessions end only when the host taps End. One that never was (its tab was closed) is deleted by the
+// daily cleanup this long after it started; no lecture runs that long.
+const ABANDONED_MS = 24 * 3600 * 1000;
 const REPORT_PAGE = 50; // check-ins per state/report response, keeps each response well under 6 MB
 
 const json = (data, status = 200, headers = {}) =>
@@ -85,24 +85,27 @@ const readEntries = async (db, sid, ids) =>
 // Remove a session, its check-ins and the pointers to it. The record goes last, so a cleanup that is
 // cut short leaves the record behind and the next run finishes the job.
 async function removeSession(db, s) {
+  // pointers written by earlier versions (one live session per host, session history)
   const active = await db.sessions.get(`active/${s.hostId}`, { type: 'json' });
   if (active?.id === s.id) await db.sessions.delete(`active/${s.hostId}`);
-  await db.sessions.delete(`h/${s.hostId}/${s.id}`); // history index written by earlier versions
+  await db.sessions.delete(`h/${s.hostId}/${s.id}`);
   const { blobs } = await db.checkins.list({ prefix: `${s.id}/` });
   await Promise.all(blobs.map((b) => db.checkins.delete(b.key)));
   await db.sessions.delete(`sess/${s.id}`);
 }
 
 // Photos are not kept forever. Runs daily (netlify/functions/cleanup.mjs) over every host's sessions
-// and removes those that ended more than KEEP_MS ago without a PDF being made, and those left running
-// past MAX_SESSION_MS (a host who closed the tab instead of tapping End, and never came back).
+// and removes those that ended more than KEEP_MS ago without a PDF being made, and those never ended
+// that started more than ABANDONED_MS ago (the host closed the tab instead of tapping End).
 export async function cleanup({ db, now = Date.now }) {
   const t = now();
   const { blobs } = await db.sessions.list({ prefix: 'sess/' });
   let removed = 0;
   for (const { key } of blobs) { // one session at a time, to stay clear of rate limits
     const s = await db.sessions.get(key, { type: 'json' });
-    if (!s || !(isStale(s, t) || (s.endedAt && t - s.endedAt > KEEP_MS))) continue;
+    if (!s) continue;
+    const old = s.endedAt ? t - s.endedAt > KEEP_MS : t - s.startedAt > ABANDONED_MS;
+    if (!old) continue;
     await removeSession(db, s);
     removed++;
   }
@@ -136,7 +139,7 @@ export async function handle(req, { db, now = Date.now } = {}) {
     if (dot < 1 || !/^[A-Za-z0-9-]{1,40}$/.test(sid)) return fail(410, 'wrong_session');
     const session = await getSession(sid);
     if (!session) return fail(410, 'wrong_session');
-    if (session.endedAt || isStale(session, t)) return fail(410, 'ended');
+    if (session.endedAt) return fail(410, 'ended');
     const win = Math.floor(t / WINDOW_MS);
     // The current code is valid. The previous one is honoured only for a short grace period after a
     // rotation (a scan that was in flight), so a code is good for 5 s plus GRACE_MS, not 10 s.
@@ -161,35 +164,31 @@ export async function handle(req, { db, now = Date.now } = {}) {
   const hostId = hostIdFor(key);
   const action = route.slice(5);
 
-  const activeSession = async () => {
-    const a = await db.sessions.get(`active/${hostId}`, { type: 'json' });
-    const s = a ? await getSession(a.id) : null;
-    if (!s || s.endedAt) return null;
-    if (isStale(s, t)) { // left running from an earlier lecture: gone, so the next one starts clean
-      await removeSession(db, s);
-      return null;
-    }
-    return s;
+  // Sessions are addressed by id, and a host can run any number at once (one per host page). Only
+  // the host who started a session can see or change it: its id is in the QR, its key is not.
+  const ownSession = async (sid) => {
+    const s = await getSession(sid);
+    return s && s.hostId === hostId ? s : null;
   };
+  const validId = (sid) => /^[A-Za-z0-9-]{1,40}$/.test(sid);
 
   if (action === 'start' && method === 'POST') {
-    const existing = await activeSession();
-    if (existing) return json({ sessionId: existing.id, startedAt: existing.startedAt });
     const body = await readJson(req);
     const title = normName(String(body.title ?? '')).slice(0, MAX_TITLE);
     const id = `${new Date(t).toISOString().slice(0, 10)}-${randomBytes(5).toString('hex')}`;
     const session = { id, hostId, title, secret: randomBytes(24).toString('base64url'), startedAt: t, endedAt: null, count: 0 };
     await db.sessions.setJSON(`sess/${id}`, session);
-    await db.sessions.setJSON(`active/${hostId}`, { id });
     return json({ sessionId: id, startedAt: t });
   }
 
   if (action === 'state' && method === 'GET') {
-    const session = await activeSession();
-    if (!session) return json({ active: false });
-    // `after` is the newest check-in the host page already holds for session `s`: it gets only newer
-    // ones, so each photo travels once and the page ends up with every check-in (for an offline PDF).
-    const after = url.searchParams.get('s') === session.id ? url.searchParams.get('after') ?? '' : '';
+    const sid = url.searchParams.get('s') ?? '';
+    if (!validId(sid)) return fail(400, 'bad_session');
+    const session = await ownSession(sid);
+    if (!session || session.endedAt) return json({ active: false });
+    // `after` is the newest check-in the host page already holds: it gets only newer ones, so each
+    // photo travels once and the page ends up with every check-in (for an offline PDF).
+    const after = url.searchParams.get('after') ?? '';
     const { count, at } = await listSession(db, session.id);
     const newer = at.filter((id) => id > after);
     const entries = await readEntries(db, session.id, newer.slice(0, REPORT_PAGE));
@@ -210,11 +209,14 @@ export async function handle(req, { db, now = Date.now } = {}) {
   }
 
   if (action === 'end' && method === 'POST') {
-    const session = await activeSession();
-    if (!session) return fail(409, 'no_session');
+    const body = await readJson(req);
+    const sid = String(body.sessionId ?? '');
+    if (!validId(sid)) return fail(400, 'bad_session');
+    const session = await ownSession(sid);
+    if (!session) return fail(404, 'no_such_session');
+    if (session.endedAt) return fail(409, 'already_ended');
     const done = { ...session, endedAt: t, count: (await listSession(db, session.id)).count };
     await db.sessions.setJSON(`sess/${session.id}`, done);
-    await db.sessions.delete(`active/${hostId}`);
     return json({ sessionId: done.id, title: done.title, startedAt: done.startedAt, endedAt: done.endedAt, count: done.count });
   }
 
@@ -222,9 +224,9 @@ export async function handle(req, { db, now = Date.now } = {}) {
     // The host's browser has made the PDF: nothing about the session is kept any longer.
     const body = await readJson(req);
     const sid = String(body.sessionId ?? '');
-    if (!/^[A-Za-z0-9-]{1,40}$/.test(sid)) return fail(400, 'bad_session');
-    const session = await getSession(sid);
-    if (!session || session.hostId !== hostId) return fail(404, 'no_such_session');
+    if (!validId(sid)) return fail(400, 'bad_session');
+    const session = await ownSession(sid);
+    if (!session) return fail(404, 'no_such_session');
     if (!session.endedAt) return fail(409, 'not_ended');
     await removeSession(db, session);
     return json({ deleted: true });
@@ -232,9 +234,9 @@ export async function handle(req, { db, now = Date.now } = {}) {
 
   if (action === 'report' && method === 'GET') {
     const sid = url.searchParams.get('s') ?? '';
-    if (!/^[A-Za-z0-9-]{1,40}$/.test(sid)) return fail(400, 'bad_session');
-    const session = await getSession(sid);
-    if (!session || session.hostId !== hostId) return fail(404, 'no_such_session'); // only the host who ran it
+    if (!validId(sid)) return fail(400, 'bad_session');
+    const session = await ownSession(sid);
+    if (!session) return fail(404, 'no_such_session');
     const after = url.searchParams.get('after') ?? '';
     const { count, at } = await listSession(db, sid);
     const ids = at.filter((id) => id > after);
