@@ -164,6 +164,21 @@ export async function handle(req, { db, now = Date.now } = {}) {
     return json({ sessionId: done.id, title: done.title, startedAt: done.startedAt, endedAt: done.endedAt, count: done.count });
   }
 
+  if (action === 'delete' && method === 'POST') {
+    const body = await readJson(req);
+    const sid = String(body.sessionId ?? '');
+    if (!/^[A-Za-z0-9-]{1,40}$/.test(sid)) return fail(400, 'bad_session');
+    const session = await getSession(sid);
+    if (!session || session.hostId !== hostId) return fail(404, 'no_such_session'); // only your own
+    if (!session.endedAt) return fail(409, 'still_running'); // end it first
+    // Hide it from the list first, then remove the photos and finally the record itself.
+    await db.sessions.delete(`h/${hostId}/${sid}`);
+    const { blobs } = await db.checkins.list({ prefix: `${sid}/` });
+    await Promise.all(blobs.map((b) => db.checkins.delete(b.key)));
+    await db.sessions.delete(`sess/${sid}`);
+    return json({ deleted: sid, removed: blobs.length });
+  }
+
   if (action === 'sessions' && method === 'GET') {
     const prefix = `h/${hostId}/`;
     const { blobs } = await db.sessions.list({ prefix });

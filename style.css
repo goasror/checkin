@@ -113,6 +113,15 @@ input:focus { outline: 3px solid #b9c6ff; border-color: var(--accent); }
   cursor: pointer;
 }
 
+.icon-btn.armed {
+  width: auto;
+  padding: 0 14px;
+  background: #fde8e6;
+  color: #b42318;
+  font: 700 13px var(--font);
+}
+.icon-btn:disabled { opacity: 0.5; }
+
 /* ---------- selfie circle ---------- */
 .cam {
   position: relative;

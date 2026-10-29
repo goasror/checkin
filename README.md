@@ -34,7 +34,7 @@ Netlify Drop (dragging a folder into the dashboard) does not build functions. Us
   Then a confirmation appears. **Check in someone else** starts again for the next person on the same phone.
 - The host sees the count and the latest check-ins with photos, and glances at them against the room.
 - The host taps **End & download** (twice, so it cannot happen by accident). A PDF downloads: two columns,
-  each with photo, name and time. Earlier sessions stay on the host page, each with its own download button.
+  each with photo, name and time. Earlier sessions stay on the host page, each with a download button and a delete button (tap twice; it removes the photos too, for good).
 
 ## How hosts are identified
 

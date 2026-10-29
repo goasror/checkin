@@ -167,3 +167,25 @@ test('a large session produces a multi-page PDF', async () => {
   const doc = await PDFDocument.load(await res.arrayBuffer());
   assert.ok(doc.getPageCount() >= 4, `expected several pages, got ${doc.getPageCount()}`);
 });
+
+test('a host can delete their own ended sessions, and only those', async () => {
+  const { hostA, hostB, startAs, checkin, clock } = setup();
+  const s = await startAs(hostA, 'Old lecture');
+  await checkin('Ada Lovelace', s.code);
+  assert.equal((await hostA('POST', '/api/host/delete', { sessionId: s.sessionId })).status, 409); // still running
+  const ended = await (await hostA('POST', '/api/host/end')).json();
+  assert.equal((await hostB('POST', '/api/host/delete', { sessionId: ended.sessionId })).status, 404); // not B's
+  assert.equal((await hostA('POST', '/api/host/delete', { sessionId: '../x' })).status, 400);
+  clock.t += 1000;
+  const keep = await startAs(hostA, 'Keep me');
+  await checkin('Alan Turing', keep.code);
+  await hostA('POST', '/api/host/end');
+
+  const res = await hostA('POST', '/api/host/delete', { sessionId: ended.sessionId });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).removed, 2); // the check-in and its name marker
+  assert.equal((await hostA('GET', `/api/host/pdf?s=${ended.sessionId}`)).status, 404);
+  const list = (await (await hostA('GET', '/api/host/sessions')).json()).sessions;
+  assert.deepEqual(list.map((x) => x.title), ['Keep me']); // the other session is untouched
+  assert.equal((await hostA('GET', `/api/host/pdf?s=${keep.sessionId}`)).status, 200);
+});

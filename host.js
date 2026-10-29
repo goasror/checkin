@@ -232,7 +232,36 @@
         btn.setAttribute('aria-label', `Download PDF report for ${label}`);
         btn.innerHTML = '<svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0f172a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7.5 11l4.5 4.5 4.5-4.5"/><path d="M5 19h14"/></svg>';
         btn.addEventListener('click', () => download(s.id).catch(failed));
-        row.append(box, btn);
+
+        // Delete: first tap arms the button, second tap removes the session and its photos for good.
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'icon-btn';
+        del.setAttribute('aria-label', `Delete ${label}`);
+        const trash = '<svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#b42318" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/></svg>';
+        del.innerHTML = trash;
+        let armed = 0;
+        del.addEventListener('click', async () => {
+          if (!armed) {
+            del.textContent = 'Delete?';
+            del.classList.add('armed');
+            armed = setTimeout(() => { armed = 0; del.innerHTML = trash; del.classList.remove('armed'); }, 4000);
+            return;
+          }
+          clearTimeout(armed);
+          del.disabled = true;
+          try {
+            const res = await post('delete', { sessionId: s.id });
+            if (!res.ok) throw new Error('delete');
+            row.remove();
+            $('#pastEmpty').hidden = list.children.length > 0;
+          } catch {
+            $('#homeErr').textContent = 'Could not delete. Try again.';
+            del.disabled = false;
+            armed = 0; del.innerHTML = trash; del.classList.remove('armed');
+          }
+        });
+        row.append(box, btn, del);
         list.append(row);
       }
       $('#pastEmpty').hidden = sessions.length > 0;
