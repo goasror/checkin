@@ -28,10 +28,21 @@
     ls.set(KEY, hostKey);
   }
 
+  const WINDOW_MS = 5000; // QR rotation, as in api.mjs
+  const MAX_SESSION_MS = 3 * 3600 * 1000; // a session left running this long is deleted, as in api.mjs
+  const LATEST = 12; // check-ins shown in the live list
+
   let pollTimer = 0;
+  let pollGen = 0; // bumped to drop the answer of a poll still in flight
   let lastToken = '';
-  const photos = new Map(); // student id -> data URL, so each photo is downloaded once
-  let shownIds = [];
+  // Every check-in of the live session as it arrives, so a PDF can still be made if the connection
+  // drops: { sessionId, title, startedAt, count, entries: [{ id, name, time, dup, photo }] }.
+  let local = null;
+  let shownIds = null; // ids currently in the list, to skip redrawing when nothing changed
+  const lastId = () => (local && local.entries.length ? local.entries[local.entries.length - 1].id : '');
+  // Same name rule as the server and the PDF: every check-in under a repeated name is flagged.
+  const nameKey = (s) => String(s).normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
+  const isDup = (p) => local.names.get(nameKey(p.name)) > 1;
 
   function show(name) {
     screens.forEach((s) => { s.hidden = s.dataset.screen !== name; });
@@ -68,25 +79,26 @@
   function restartDrain(msLeft) {
     const el = $('#drain');
     el.style.transition = 'none';
-    el.style.transform = `scaleX(${Math.max(0, Math.min(1, msLeft / 10000))})`;
+    el.style.transform = `scaleX(${Math.max(0, Math.min(1, msLeft / WINDOW_MS))})`;
     void el.offsetWidth; // flush so the next transition starts from here
     el.style.transition = `transform ${msLeft}ms linear`;
     el.style.transform = 'scaleX(0)';
   }
 
-  function renderLatest(latest) {
+  function renderLatest() {
+    const latest = local.entries.slice(-LATEST).reverse();
+    const ids = latest.map((p) => p.id + (isDup(p) ? '!' : '')).join(','); // an earlier row can become a repeat
+    if (ids === shownIds) return;
+    shownIds = ids;
     const ul = $('#latest');
     ul.textContent = '';
-    shownIds = [];
     for (const p of latest) {
-      if (p.photo) photos.set(p.id, p.photo);
-      shownIds.push(p.id);
       const li = document.createElement('li');
       li.className = 'row';
       const img = document.createElement('img');
       img.className = 'avatar';
       img.alt = '';
-      img.src = photos.get(p.id) || '';
+      img.src = p.photo || '';
       const box = document.createElement('div');
       box.style.cssText = 'min-width:0;flex-grow:1';
       const name = document.createElement('div');
@@ -96,7 +108,7 @@
       sub.className = 'sub';
       sub.textContent = fmtTime(p.time);
       box.append(name, sub);
-      if (p.dup) {
+      if (isDup(p)) {
         const flag = document.createElement('div');
         flag.className = 'flag';
         flag.textContent = 'Same name used more than once';
@@ -110,6 +122,8 @@
 
   function renderLive(s) {
     $('#liveTitle').textContent = s.title || 'Scan to check in';
+    // so a session left running from an earlier lecture is easy to spot
+    $('#liveSince').textContent = `Started ${fmtTime(s.startedAt)} · ends on its own at ${fmtTime(s.startedAt + MAX_SESSION_MS)}`;
     $('#count').textContent = s.count;
     $('#joinUrl').textContent = location.host + '/';
     if (s.token !== lastToken) {
@@ -117,26 +131,67 @@
       drawQr(`${location.origin}/?c=${s.sessionId}.${s.token}`);
       restartDrain(s.msLeft);
     }
-    renderLatest(s.latest);
+    renderLatest();
   }
 
   function setOnline(ok) {
     $('#livePill').classList.toggle('off', !ok);
     $('#liveText').textContent = ok ? 'Live' : 'Offline';
+    document.body.classList.toggle('is-offline', !ok); // dims the QR: it has stopped changing
+    $('#offline').hidden = ok;
   }
 
+  // Keep the screen on while a session is live: a sleeping screen hides the QR, and a hidden page
+  // stops refreshing it. The browser drops the lock whenever the page is hidden, so the next poll
+  // after it comes back asks again.
+  let wakeLock = null; // a WakeLockSentinel, or the promise of one while it is being asked for
+  function keepAwake(on) {
+    if (!on) {
+      Promise.resolve(wakeLock).then((l) => l && l.release()).catch(() => {});
+      wakeLock = null;
+      return;
+    }
+    if (wakeLock || !('wakeLock' in navigator) || document.hidden) return;
+    const asked = navigator.wakeLock.request('screen').then(
+      (l) => {
+        if (wakeLock !== asked) { l.release(); return null; } // turned off while asking
+        wakeLock = l;
+        l.addEventListener('release', () => { if (wakeLock === l) wakeLock = null; });
+        return l;
+      },
+      () => { if (wakeLock === asked) wakeLock = null; return null; }, // refused, e.g. battery saver
+    );
+    wakeLock = asked;
+  }
+
+  // Only the newest call keeps polling: a second call while a request is in flight (tab shown
+  // again, session started) would otherwise leave two loops running.
   async function poll() {
     clearTimeout(pollTimer);
+    const gen = ++pollGen;
     let delay = 3000;
     try {
-      const res = await api('state?have=' + encodeURIComponent(shownIds.join(',')));
+      const sid = local ? local.sessionId : '';
+      const res = await api(`state?s=${encodeURIComponent(sid)}&after=${encodeURIComponent(lastId())}`);
+      if (!res.ok) throw new Error('state'); // a server error is not "no session": stay on the live screen
       const s = await res.json();
+      if (gen !== pollGen) return;
       if (!s.active) return showHome();
+      if (!local || local.sessionId !== s.sessionId) local = { sessionId: s.sessionId, entries: [], names: new Map() };
+      Object.assign(local, { title: s.title, startedAt: s.startedAt, count: s.count });
+      for (const p of s.entries) {
+        local.entries.push(p);
+        local.names.set(nameKey(p.name), (local.names.get(nameKey(p.name)) || 0) + 1);
+      }
       setOnline(true);
       if (document.body.dataset.screen !== 'live') show('live');
       renderLive(s);
-      delay = Math.max(500, Math.min(3000, s.msLeft + 80)); // refresh right after the code rotates
+      keepAwake(true);
+      // Catching up on a backlog: ask again soon. Otherwise once per code, right after it rotates
+      // (one function call per 5 s); the check-in list refreshes along with it.
+      delay = s.more ? 200 : s.msLeft + 80;
     } catch {
+      if (gen !== pollGen) return;
       setOnline(false);
       if (!document.body.dataset.screen) {
         show('home');
@@ -161,12 +216,21 @@
     try {
       const res = await post('end');
       const done = await res.json();
-      clearTimeout(pollTimer);
-      await showHome(done);
-      if (done.sessionId) await download(done.sessionId).catch(() => {});
-    } catch { /* offline: leave the session running */ }
+      showHome(res.ok ? done : undefined); // not ok: it was already ended, e.g. from another device
+      if (res.ok) $('#endedDownload').click(); // same path as the button: shows progress and errors
+    } catch {
+      setOnline(false); // the session keeps running; the offline box offers a PDF of what is here
+    }
     btn.disabled = false;
     disarm();
+  });
+
+  $('#offlineSave').addEventListener('click', async () => {
+    if (!local) return;
+    const btn = $('#offlineSave');
+    btn.disabled = true;
+    await localFile().then(save, () => {});
+    btn.disabled = false;
   });
   function disarm() {
     $('#endBtn').classList.remove('armed');
@@ -175,70 +239,100 @@
 
   // ---- download -------------------------------------------------------------
 
-  async function download(sessionId) {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    const res = await api(`pdf?s=${encodeURIComponent(sessionId)}&tz=${encodeURIComponent(tz)}`);
-    if (!res.ok) throw new Error('pdf');
-    const blob = await res.blob();
-    const match = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '');
+  // The page already holds the check-ins it polled; the server sends only the rest (in pages).
+  async function makeReport(sessionId) {
+    const mine = local && local.sessionId === sessionId ? local.entries : [];
+    let data = null;
+    let after = mine.length ? mine[mine.length - 1].id : '';
+    do {
+      const res = await api(`report?s=${encodeURIComponent(sessionId)}&after=${encodeURIComponent(after)}`);
+      if (!res.ok) throw new Error('report');
+      const page = await res.json();
+      if (data) data.entries.push(...page.entries);
+      else data = { ...page, entries: [...mine, ...page.entries] };
+      after = page.next;
+    } while (after);
+    return makeFile(data);
+  }
+
+  // Without the server: a PDF of the check-ins this page holds, marked as possibly incomplete.
+  const localFile = () => makeFile({ ...local, note: 'saved offline, may be incomplete' });
+
+  // report.js draws the PDF here in the browser.
+  async function makeFile(data) {
+    const blob = await window.buildReport(data);
+    const d = new Date(data.startedAt);
+    const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const slug = (data.title || '').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 30);
+    return { blob, filename: `attendance-${day}${slug ? '-' + slug : ''}.pdf` };
+  }
+
+  function save({ blob, filename }) {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = match ? match[1] : 'attendance.pdf';
+    a.download = filename;
     document.body.append(a);
     a.click();
     a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
   }
 
-  // ---- home: start a session, earlier sessions ------------------------------
+  // ---- home: start a session, or download the one that just ended -----------
 
-  async function showHome(justEnded) {
+  function showHome(justEnded) {
     clearTimeout(pollTimer);
+    pollGen++;
+    keepAwake(false);
     lastToken = '';
-    shownIds = [];
+    shownIds = null;
     $('#homeErr').textContent = '';
     $('#endedBlock').hidden = !justEnded;
     $('#startBlock').hidden = !!justEnded;
     if (justEnded) {
       const label = justEnded.title ? `${justEnded.title} · ` : '';
       $('#endedMeta').textContent = `${label}${fmtDay(justEnded.startedAt)} · ${justEnded.count} checked in`;
-      const failed = () => { $('#homeErr').textContent = 'Download failed. Try again.'; };
-      $('#endedDownload').onclick = () => download(justEnded.sessionId).catch(failed);
+      // Once the PDF is made, the server copy is deleted and this page keeps the file, so
+      // "Download" still works afterwards. If the delete fails, the daily cleanup removes it.
+      let file = null;
+      // Leaving before the PDF is made loses access to it, so that needs a second tap.
+      const again = $('#newSession');
+      let armed = false;
+      again.textContent = 'Start another session';
+      again.onclick = () => {
+        if (!file && !armed) {
+          armed = true;
+          again.textContent = 'PDF not saved yet. Tap again to continue';
+          return;
+        }
+        showHome();
+      };
+      $('#endedDownload').onclick = async () => {
+        const btn = $('#endedDownload');
+        const text = btn.querySelector('span');
+        btn.disabled = true;
+        text.textContent = 'Preparing PDF…';
+        $('#homeErr').textContent = '';
+        try {
+          if (!file) {
+            file = await makeReport(justEnded.sessionId);
+            post('delete', { sessionId: justEnded.sessionId }).catch(() => {});
+            local = null; // the PDF has it all now
+          }
+          save(file);
+        } catch {
+          // Offline after ending: save what this page has. The full report stays on the server.
+          const mine = local && local.sessionId === justEnded.sessionId;
+          $('#homeErr').textContent = mine
+            ? 'No connection. Saved the check-ins this page had. Tap again when you are back online for the full report.'
+            : 'Download failed. Try again.';
+          if (mine) await localFile().then(save, () => {});
+        }
+        btn.disabled = false;
+        text.textContent = 'Download PDF report';
+      };
     }
     $('#linkBox').value = `${location.origin}${location.pathname}#key=${hostKey}`;
     show('home');
-    try {
-      const res = await api('sessions');
-      const { sessions } = await res.json();
-      const list = $('#past');
-      list.textContent = '';
-      for (const s of sessions) {
-        const row = document.createElement('div');
-        row.className = 'row';
-        const box = document.createElement('div');
-        box.style.cssText = 'min-width:0;flex-grow:1';
-        const top = document.createElement('div');
-        top.className = 'name';
-        top.textContent = s.title || `${fmtDay(s.startedAt)}, ${fmtTime(s.startedAt)}`;
-        const sub = document.createElement('div');
-        sub.className = 'sub';
-        sub.textContent = `${s.title ? fmtDay(s.startedAt) + ' · ' : ''}${s.count} checked in`;
-        box.append(top, sub);
-        const label = s.title || fmtDay(s.startedAt);
-        const failed = () => { $('#homeErr').textContent = 'Download failed. Try again.'; };
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'icon-btn';
-        btn.setAttribute('aria-label', `Download PDF report for ${label}`);
-        btn.innerHTML = '<svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0f172a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7.5 11l4.5 4.5 4.5-4.5"/><path d="M5 19h14"/></svg>';
-        btn.addEventListener('click', () => download(s.id).catch(failed));
-        row.append(box, btn);
-        list.append(row);
-      }
-      $('#pastEmpty').hidden = sessions.length > 0;
-    } catch {
-      $('#homeErr').textContent = 'Could not load earlier sessions. Check your connection.';
-    }
   }
 
   $('#startForm').addEventListener('submit', async (e) => {

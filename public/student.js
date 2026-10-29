@@ -127,6 +127,7 @@
   const scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
   let scanStream = null;
   let scanning = false;
+  let rejected = ''; // a code the server already turned down: not sent again while it is still in view
 
   function codeFromQr(text) {
     try {
@@ -143,17 +144,18 @@
     $('#scanThumb').src = draft.photo;
     scanMsg.textContent = message;
     show('scan');
-    if (scanStream) stopStream(scanStream);
-    try {
-      scanStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
-        audio: false,
-      });
-      scanVideo.srcObject = scanStream;
-      await scanVideo.play();
-    } catch {
-      scanMsg.textContent = 'Allow the camera to scan the code on the screen.';
-      return;
+    if (!scanStream) { // after a failed check-in the camera is still on: keep using it
+      try {
+        scanStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
+          audio: false,
+        });
+        scanVideo.srcObject = scanStream;
+        await scanVideo.play();
+      } catch {
+        scanMsg.textContent = 'Allow camera access in your browser to scan the code, then reload this page.';
+        return;
+      }
     }
     scanning = true;
     tick();
@@ -169,14 +171,18 @@
     if (!scanning) return;
     if (scanVideo.readyState >= 2 && scanVideo.videoWidth && window.jsQR) {
       const scale = Math.min(1, 480 / Math.max(scanVideo.videoWidth, scanVideo.videoHeight));
-      scanCanvas.width = Math.round(scanVideo.videoWidth * scale);
-      scanCanvas.height = Math.round(scanVideo.videoHeight * scale);
-      scanCtx.drawImage(scanVideo, 0, 0, scanCanvas.width, scanCanvas.height);
-      const img = scanCtx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
+      const w = Math.round(scanVideo.videoWidth * scale);
+      const h = Math.round(scanVideo.videoHeight * scale);
+      if (scanCanvas.width !== w || scanCanvas.height !== h) { // resizing reallocates the canvas
+        scanCanvas.width = w;
+        scanCanvas.height = h;
+      }
+      scanCtx.drawImage(scanVideo, 0, 0, w, h);
+      const img = scanCtx.getImageData(0, 0, w, h);
       const hit = window.jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
       const code = hit && codeFromQr(hit.data);
-      if (code) {
-        stopScan();
+      if (code && code !== rejected) {
+        scanning = false; // pause; the camera stays on in case the code is turned down
         checkIn(code);
         return;
       }
@@ -193,9 +199,12 @@
     const res = await post('checkin', { name: draft.name, photo: draft.photo, code });
     busy = false;
     if (res.ok) return showDone(res.data);
+    // Never resend this exact code: if it was turned down it will not work later either, and after a
+    // network error a fresh code is on screen within 5 seconds (this avoids a tight retry loop offline).
+    rejected = code;
     const err = res.data.error;
-    if (err === 'bad_name') return showName(MSG.bad_name);
-    if (err === 'bad_photo') return showSelfie(MSG.bad_photo);
+    if (err === 'bad_name') { stopScan(); return showName(MSG.bad_name); }
+    if (err === 'bad_photo') { stopScan(); return showSelfie(MSG.bad_photo); }
     if (err === 'ended') return showWait(MSG.ended, 'Session ended');
     return startScan(MSG[err] || 'Could not check in. Try again.');
   }
@@ -222,9 +231,14 @@
   $('#waitRetry').addEventListener('click', () => showName());
 
   document.addEventListener('visibilitychange', () => {
-    // Free the camera when the tab is hidden; resume scanning when it comes back.
-    if (document.hidden) { if (scanning) stopScan(); }
-    else if (document.body.dataset.screen === 'scan' && !scanning && !busy) startScan();
+    // Free the camera when the tab is hidden; turn it back on when the tab comes back.
+    const screen = document.body.dataset.screen;
+    if (document.hidden) {
+      stopScan();
+      stopStream(selfieStream);
+      selfieStream = null;
+    } else if (screen === 'scan' && !scanning && !busy) startScan();
+    else if (screen === 'selfie' && !selfieStream) showSelfie();
   });
 
   showName();

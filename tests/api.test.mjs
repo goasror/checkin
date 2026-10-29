@@ -1,8 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
-import { PDFDocument } from 'pdf-lib';
-import { handle } from '../netlify/functions/api.mjs';
+import { handle, cleanup } from '../netlify/functions/api.mjs';
 
 // Minimal in-memory stand-in for a Netlify Blobs store.
 class MemStore {
@@ -24,7 +22,7 @@ class MemStore {
   }
 }
 
-// A real (tiny) JPEG, so the PDF test can embed it.
+// A real (tiny) JPEG.
 const JPEG_B64 =
   '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAAAP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==';
 const PHOTO = `data:image/jpeg;base64,${JPEG_B64}`;
@@ -50,7 +48,21 @@ function setup() {
     return { ...s, code: `${s.sessionId}.${s.token}` };
   };
   const checkin = (name, code, photo = PHOTO) => call('POST', '/api/checkin', { name, photo, code });
-  return { call, hostA: as(KEY_A), hostB: as(KEY_B), startAs, checkin, clock };
+  const report = async (hostCall, sid) => {
+    let all = null;
+    let after = '';
+    do {
+      const res = await hostCall('GET', `/api/host/report?s=${sid}&after=${after}`);
+      if (res.status !== 200) return { status: res.status };
+      const page = await res.json();
+      if (all) all.entries.push(...page.entries);
+      else all = { status: 200, ...page };
+      after = page.next;
+    } while (after);
+    return all;
+  };
+  const runCleanup = () => cleanup({ db, now: () => clock.t });
+  return { call, hostA: as(KEY_A), hostB: as(KEY_B), startAs, checkin, clock, report, runCleanup };
 }
 
 test('host endpoints need a well-formed key, any key works', async () => {
@@ -69,11 +81,15 @@ test('check-in validates name, photo and code', async () => {
   assert.equal((await checkin('Ada Lovelace', 'nope.nope')).status, 410);
   assert.equal((await checkin('Ada Lovelace', 'garbage')).status, 410);
   clock.t += 3000;
-  assert.equal((await checkin('Ada Lovelace', s.code)).status, 200); // current + previous window
-  clock.t += 25000;
-  const late = await checkin('Alan Turing', s.code); // a screenshot from half a minute ago
+  assert.equal((await checkin('Ada Lovelace', s.code)).status, 200); // same window
+  clock.t += 3000; // 6 s in: the code was replaced 1 s ago, a scan in flight still lands
+  assert.equal((await checkin('Alan Turing', s.code)).status, 200);
+  clock.t += 3000; // 9 s in: replaced 4 s ago, past the grace period
+  const late = await checkin('Grace Hopper', s.code);
   assert.equal(late.status, 410);
   assert.equal((await late.json()).error, 'expired');
+  clock.t += 25000; // a screenshot from half a minute ago
+  assert.equal((await checkin('Grace Hopper', s.code)).status, 410);
 });
 
 test('nothing is remembered: each check-in brings its own name and photo', async () => {
@@ -86,8 +102,8 @@ test('nothing is remembered: each check-in brings its own name and photo', async
   }
   const state = await (await hostA('GET', '/api/host/state')).json();
   assert.equal(state.count, 3);
-  assert.deepEqual(state.latest.map((p) => p.name), ['Grace Hopper', 'Alan Turing', 'Ada Lovelace']);
-  assert.ok(state.latest.every((p) => p.photo && !p.dup));
+  assert.deepEqual(state.entries.map((p) => p.name), ['Ada Lovelace', 'Alan Turing', 'Grace Hopper']);
+  assert.ok(state.entries.every((p) => p.photo && !p.dup));
 });
 
 test('the same name twice is flagged, not blocked, and counted once', async () => {
@@ -100,10 +116,15 @@ test('the same name twice is flagged, not blocked, and counted once', async () =
   assert.equal(second.dup, true);
   const state = await (await hostA('GET', '/api/host/state')).json();
   assert.equal(state.count, 1); // one person...
-  assert.equal(state.latest.length, 2); // ...two check-ins to compare
-  assert.equal(state.latest[0].dup, true);
-  const again = await (await hostA('GET', `/api/host/state?have=${state.latest[0].id}`)).json();
-  assert.equal(again.latest[0].photo, undefined); // the host already holds this photo
+  assert.equal(state.entries.length, 2); // ...two check-ins to compare
+  assert.equal(state.entries[1].dup, true);
+  const [a, b] = state.entries;
+  const newer = await (await hostA('GET', `/api/host/state?s=${s.sessionId}&after=${a.id}`)).json();
+  assert.deepEqual(newer.entries.map((p) => p.id), [b.id]); // only what the host does not hold yet
+  const none = await (await hostA('GET', `/api/host/state?s=${s.sessionId}&after=${b.id}`)).json();
+  assert.deepEqual(none.entries, []);
+  const other = await (await hostA('GET', `/api/host/state?s=some-other-session&after=${b.id}`)).json();
+  assert.equal(other.entries.length, 2); // `after` from another session is ignored
 });
 
 test('hosts run side by side: lists, codes and downloads stay separate', async () => {
@@ -117,48 +138,112 @@ test('hosts run side by side: lists, codes and downloads stay separate', async (
 
   const stateA = await (await hostA('GET', '/api/host/state')).json();
   const stateB = await (await hostB('GET', '/api/host/state')).json();
-  assert.deepEqual(stateA.latest.map((p) => p.name), ['Ada Lovelace']);
-  assert.deepEqual(stateB.latest.map((p) => p.name), ['Alan Turing']);
+  assert.deepEqual(stateA.entries.map((p) => p.name), ['Ada Lovelace']);
+  assert.deepEqual(stateB.entries.map((p) => p.name), ['Alan Turing']);
 
   const endedB = await (await hostB('POST', '/api/host/end')).json();
-  assert.equal((await hostA('GET', `/api/host/pdf?s=${endedB.sessionId}`)).status, 404); // not A's session
-  assert.equal((await (await hostA('GET', '/api/host/sessions')).json()).sessions.length, 0);
-  assert.equal((await hostB('GET', `/api/host/pdf?s=${endedB.sessionId}`)).status, 200);
+  assert.equal((await hostA('GET', `/api/host/report?s=${endedB.sessionId}`)).status, 404); // not A's session
+  assert.equal((await hostB('GET', `/api/host/report?s=${endedB.sessionId}`)).status, 200);
   assert.equal((await (await hostA('GET', '/api/host/state')).json()).active, true); // A is unaffected
 });
 
-test('ending a session closes it and the PDF report is produced', async () => {
-  const { call, hostA, startAs, checkin } = setup();
+test('ending a session closes it and the report data has every check-in with its photo', async () => {
+  const { call, hostA, startAs, checkin, report, clock } = setup();
   const s = await startAs(hostA, 'Физика 101');
   await checkin('Анна Иванова', s.code);
+  clock.t += 1000;
   await checkin('Ada Lovelace', s.code);
+  clock.t += 1000;
   await checkin('Ada Lovelace', s.code); // duplicate on purpose
   const ended = await (await hostA('POST', '/api/host/end')).json();
   assert.equal(ended.count, 2);
   assert.equal((await (await hostA('GET', '/api/host/state')).json()).active, false);
   assert.equal((await checkin('Alan Turing', s.code)).status, 410); // session over
 
-  const res = await hostA('GET', `/api/host/pdf?s=${ended.sessionId}&tz=Europe/Berlin`);
-  assert.equal(res.status, 200);
-  assert.equal(res.headers.get('content-type'), 'application/pdf');
-  assert.match(res.headers.get('content-disposition'), /attendance-2026-10-26-101\.pdf/);
-  const bytes = new Uint8Array(await res.arrayBuffer());
-  assert.equal(String.fromCharCode(...bytes.slice(0, 5)), '%PDF-');
-  if (process.env.WRITE_SAMPLE_PDF) writeFileSync(process.env.WRITE_SAMPLE_PDF, bytes);
-
-  const hist = await (await hostA('GET', '/api/host/sessions')).json();
-  assert.equal(hist.sessions.length, 1);
-  assert.equal(hist.sessions[0].count, 2);
-  assert.equal((await call('GET', '/api/host/pdf?s=../../x', null, { 'x-host-key': KEY_A })).status, 400);
+  const r = await report(hostA, ended.sessionId);
+  assert.equal(r.status, 200);
+  assert.equal(r.title, 'Физика 101');
+  assert.equal(r.count, 2);
+  assert.deepEqual(r.entries.map((e) => e.name), ['Анна Иванова', 'Ada Lovelace', 'Ada Lovelace']);
+  assert.ok(r.entries.every((e) => e.photo === PHOTO && typeof e.time === 'number'));
+  assert.equal((await call('GET', '/api/host/report?s=../../x', null, { 'x-host-key': KEY_A })).status, 400);
 });
 
-test('a large session produces a multi-page PDF', async () => {
-  const { hostA, startAs, checkin } = setup();
-  const s = await startAs(hostA, 'Big lecture');
-  for (let i = 1; i <= 120; i++) await checkin(`Student Number ${i}`, s.code);
+test('once the host has the PDF, the session and its photos are deleted', async () => {
+  const { hostA, hostB, startAs, checkin, report } = setup();
+  const s = await startAs(hostA, 'Delete me');
+  await checkin('Ada Lovelace', s.code);
+  const del = (host, sessionId) => host('POST', '/api/host/delete', { sessionId });
+  assert.equal((await del(hostA, s.sessionId)).status, 409); // still running
   const ended = await (await hostA('POST', '/api/host/end')).json();
-  assert.equal(ended.count, 120);
-  const res = await hostA('GET', `/api/host/pdf?s=${ended.sessionId}`);
-  const doc = await PDFDocument.load(await res.arrayBuffer());
-  assert.ok(doc.getPageCount() >= 4, `expected several pages, got ${doc.getPageCount()}`);
+  assert.equal((await del(hostB, ended.sessionId)).status, 404); // not B's session
+  assert.equal((await report(hostA, ended.sessionId)).entries.length, 1);
+  assert.equal((await del(hostA, ended.sessionId)).status, 200);
+  assert.equal((await report(hostA, ended.sessionId)).status, 404); // gone
+  assert.equal((await del(hostA, ended.sessionId)).status, 404);
+});
+
+test('a large session comes back complete, in pages', async () => {
+  const { hostA, startAs, checkin, clock, report } = setup();
+  const s = await startAs(hostA, 'Big lecture');
+  for (let i = 1; i <= 130; i++) {
+    await checkin(`Student Number ${i}`, s.code);
+    if (i % 3 === 0) clock.t += 1; // several check-ins can share a millisecond
+  }
+  // a host page that opens mid-lecture catches up in pages too
+  const held = [];
+  let more = true;
+  while (more) {
+    const after = held.length ? held[held.length - 1].id : '';
+    const st = await (await hostA('GET', `/api/host/state?s=${s.sessionId}&after=${after}`)).json();
+    assert.ok(st.entries.length <= 50);
+    held.push(...st.entries);
+    more = st.more;
+  }
+  assert.equal(new Set(held.map((e) => e.id)).size, 130);
+  const ended = await (await hostA('POST', '/api/host/end')).json();
+  assert.equal(ended.count, 130);
+  const first = await (await hostA('GET', `/api/host/report?s=${ended.sessionId}`)).json();
+  assert.equal(first.entries.length, 50);
+  assert.ok(first.next);
+  const r = await report(hostA, ended.sessionId);
+  assert.equal(r.entries.length, 130);
+  assert.equal(new Set(r.entries.map((e) => e.id)).size, 130); // no repeats, nothing missing
+});
+
+test('a session left running is never carried into the next lecture', async () => {
+  const { hostA, startAs, checkin, clock, report } = setup();
+  const HOUR = 3600 * 1000;
+  const morning = await startAs(hostA, 'Morning'); // End is never tapped
+  await checkin('Ada Lovelace', morning.code);
+  clock.t += 2 * HOUR;
+  const still = await (await hostA('GET', '/api/host/state')).json();
+  assert.equal(still.sessionId, morning.sessionId); // a 2-hour lecture keeps running
+
+  clock.t += 2 * HOUR; // the afternoon lecture
+  const afternoon = await startAs(hostA, 'Afternoon');
+  assert.notEqual(afternoon.sessionId, morning.sessionId); // a fresh session...
+  assert.equal(afternoon.count, 0);
+  assert.equal((await report(hostA, morning.sessionId)).status, 404); // ...and the morning one is deleted
+});
+
+test('the daily cleanup removes abandoned sessions, for every host', async () => {
+  const { hostA, hostB, startAs, checkin, clock, report, runCleanup } = setup();
+  const HOUR = 3600 * 1000;
+  const ended = await startAs(hostA, 'Ended, PDF never made');
+  await checkin('Ada Lovelace', ended.code);
+  const endedA = await (await hostA('POST', '/api/host/end')).json();
+  const left = await startAs(hostB, 'Never ended'); // B closes the tab and never comes back
+  await checkin('Alan Turing', left.code);
+
+  clock.t += 2 * HOUR;
+  assert.equal(await runCleanup(), 0);
+  clock.t += 2 * HOUR;
+  assert.equal(await runCleanup(), 1); // B's session ran past 3 hours
+  assert.equal((await report(hostB, left.sessionId)).status, 404);
+  assert.equal((await report(hostA, endedA.sessionId)).status, 200); // ended: kept a week for its PDF
+
+  clock.t += 7 * 24 * HOUR;
+  assert.equal(await runCleanup(), 1);
+  assert.equal((await report(hostA, endedA.sessionId)).status, 404);
 });

@@ -1,6 +1,6 @@
 # Lecture check-in
 
-Attendance for lecture halls. A host shows a QR code that changes every 10 seconds. Every student, every
+Attendance for lecture halls. A host shows a QR code that changes every 5 seconds. Every student, every
 time, types their name, takes a selfie with the front camera, then scans the code. When the lecture is over,
 the host taps **End & download** and gets a PDF with a photo, name and time for everyone.
 
@@ -13,7 +13,8 @@ own secret, so a student only appears in the list of the host whose QR they scan
 and download their own sessions.
 
 It is a static site (`public/`) plus one Netlify Function (`netlify/functions/api.mjs`) that stores
-check-ins in Netlify Blobs. GitHub Pages cannot run it, because it has nowhere to store anything. Push the
+check-ins in Netlify Blobs, and a scheduled function (`netlify/functions/cleanup.mjs`) that deletes old
+sessions once a day. GitHub Pages cannot run it, because it has nowhere to store anything. Push the
 repo to GitHub and let Netlify deploy it from there.
 
 ## Deploy
@@ -33,8 +34,18 @@ Netlify Drop (dragging a folder into the dashboard) does not build functions. Us
 - A student opens the site and goes through three steps: name, front-camera selfie, scan the screen.
   Then a confirmation appears. **Check in someone else** starts again for the next person on the same phone.
 - The host sees the count and the latest check-ins with photos, and glances at them against the room.
+- If the host's connection drops, the live page stays up, dims the QR (it has stopped changing, so
+  check-ins fail until the connection is back) and offers **Save PDF of check-ins so far**, made from the
+  check-ins the page already holds and marked as possibly incomplete.
 - The host taps **End & download** (twice, so it cannot happen by accident). A PDF downloads: two columns,
-  each with photo, name and time. The host page does not list old sessions: download the PDF right after ending. A session that ended more than 7 days ago, with its photos, is deleted automatically the next time that host starts a lecture.
+  each with photo, name and time. As soon as the PDF is made, the session and its photos are deleted from the server; the host page
+  keeps the file, so **Download PDF report** still works until the page is closed. As a safety net, a
+  daily cleanup deletes sessions that ended more than 7 days ago without a PDF being made.
+- Every lecture is its own session. One left running (End never tapped) is deleted with its check-ins 3
+  hours after it started, so the next lecture starts clean instead of adding to it. The live screen shows
+  when the session started and when it ends on its own.
+- While a session is live, the host page keeps the screen awake (where the browser allows it), so the QR
+  does not disappear when a phone or laptop would otherwise sleep.
 
 ## How hosts are identified
 
@@ -43,12 +54,12 @@ The server stores only a hash of it. That means:
 
 - No sign-up, no passcode. Opening the page is enough.
 - Sessions belong to that browser. Clearing the browser data loses access to a session you have not downloaded yet.
-- The host page has **Use on another device**: a link containing the key. Anyone who has that link can
-  download the host's files, so treat it like a password.
+- The host page has **Use this on another device**: a link containing the key. Anyone who has that link
+  can run sessions and download reports as the host, so treat it like a password.
 
 ## What it guards against, and what it does not
 
-- A photographed or screen-shared QR stops working after about 13 seconds (10 s plus a 3 s grace for scans in flight), and stops completely when the host ends the session.
+- A photographed or screen-shared QR stops working after about 8 seconds (5 s plus a 3 s grace for scans in flight), and stops completely when the host ends the session.
 - Checking in for a friend puts the friend's own face (or yours) next to the name in a list the lecturer sees.
 - If the same name is used twice in a session, both check-ins are kept and flagged ("Same name used more
   than once"), in the live list and in the PDF, so the faces can be compared.
@@ -82,6 +93,7 @@ public/host.html,  host.js       host pages: live QR, end and download
 public/style.css                 shared styles
 public/vendor/                   qrcode-generator (MIT) and jsQR (Apache-2.0), copied from npm
 netlify/functions/api.mjs        all server logic (the PDF data, not the file)
+netlify/functions/cleanup.mjs    runs the daily cleanup from api.mjs
 public/report.js                 draws the PDF in the host's browser
 tests/api.test.mjs               tests
 ```

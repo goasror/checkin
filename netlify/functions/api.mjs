@@ -10,21 +10,28 @@
 // Student:  POST /api/checkin  { name, photo, code }  -> { name, time, dup }
 // Host (x-host-key header):
 //           POST /api/host/start { title? }      -> starts (or returns) this host's live session
-//           GET  /api/host/state?have=<ids>      -> count, latest check-ins, current QR token
+//           GET  /api/host/state?s=<id>&after=<entry> -> count, check-ins newer than <entry> (oldest
+//                                                   first, up to 50), current QR token
 //           POST /api/host/end
-//           GET  /api/host/sessions              -> this host's finished sessions
-//           GET  /api/host/pdf?s=<id>&tz=<zone>  -> attendance report: photo, name and time
+//           GET  /api/host/report?s=<id>&after=<entry>  -> report data in pages of 50: name, time, photo
+//           POST /api/host/delete { sessionId }  -> removes an ended session and its photos (PDF is made)
+//
+// The PDF itself is drawn by the host's browser (public/report.js) from this data, with the same
+// photos the host already sees on screen. The server never builds files.
 
 import { createHmac, createHash, randomBytes } from 'node:crypto';
-import { PDFDocument, rgb } from 'pdf-lib';
-import fontkit from '@pdf-lib/fontkit';
-import { REGULAR, BOLD } from './font-data.mjs';
 
-const WINDOW_MS = 10_000; // QR rotation
+const WINDOW_MS = 5_000; // QR rotation
+const GRACE_MS = 3_000; // how long the previous code still works after a rotation
 const MAX_NAME = 80;
 const MAX_TITLE = 60;
 const MAX_PHOTO = 40_000; // characters of the base64 data URL
-const LATEST = 12;
+const KEEP_MS = 7 * 24 * 3600 * 1000; // how long an ended session whose PDF was never made is kept
+// Lectures are separate (they run 1-2 h): a session left running longer than this (End never tapped)
+// is deleted with its check-ins, so it is never carried into the next lecture.
+const MAX_SESSION_MS = 3 * 3600 * 1000;
+const isStale = (s, t) => !s.endedAt && t - s.startedAt > MAX_SESSION_MS;
+const REPORT_PAGE = 50; // check-ins per state/report response, keeps each response well under 6 MB
 
 const json = (data, status = 200, headers = {}) =>
   new Response(JSON.stringify(data), {
@@ -51,6 +58,56 @@ const readJson = async (req) => {
   }
 };
 
+// One listing gives both the number of distinct names (n/) and the sorted check-in ids (at/).
+// A check-in id starts with its zero-padded time, so sorting the ids sorts by time.
+async function listSession(db, sid) {
+  const { blobs } = await db.checkins.list({ prefix: `${sid}/` });
+  let count = 0;
+  const at = [];
+  for (const { key } of blobs) {
+    if (key.startsWith(`${sid}/n/`)) count++;
+    else if (key.startsWith(`${sid}/at/`)) at.push(key.slice(`${sid}/at/`.length));
+  }
+  return { count, at: at.sort() };
+}
+
+const readEntries = async (db, sid, ids) =>
+  (
+    await Promise.all(
+      ids.map(async (id) => {
+        const e = await db.checkins.get(`${sid}/at/${id}`, { type: 'json' });
+        return e && { id, name: e.name, time: e.time, dup: !!e.dup, photo: e.photo };
+      }),
+    )
+  ).filter(Boolean);
+
+// Remove a session, its check-ins and the pointers to it. The record goes last, so a cleanup that is
+// cut short leaves the record behind and the next run finishes the job.
+async function removeSession(db, s) {
+  const active = await db.sessions.get(`active/${s.hostId}`, { type: 'json' });
+  if (active?.id === s.id) await db.sessions.delete(`active/${s.hostId}`);
+  await db.sessions.delete(`h/${s.hostId}/${s.id}`); // history index written by earlier versions
+  const { blobs } = await db.checkins.list({ prefix: `${s.id}/` });
+  await Promise.all(blobs.map((b) => db.checkins.delete(b.key)));
+  await db.sessions.delete(`sess/${s.id}`);
+}
+
+// Photos are not kept forever. Runs daily (netlify/functions/cleanup.mjs) over every host's sessions
+// and removes those that ended more than KEEP_MS ago without a PDF being made, and those left running
+// past MAX_SESSION_MS (a host who closed the tab instead of tapping End, and never came back).
+export async function cleanup({ db, now = Date.now }) {
+  const t = now();
+  const { blobs } = await db.sessions.list({ prefix: 'sess/' });
+  let removed = 0;
+  for (const { key } of blobs) { // one session at a time, to stay clear of rate limits
+    const s = await db.sessions.get(key, { type: 'json' });
+    if (!s || !(isStale(s, t) || (s.endedAt && t - s.endedAt > KEEP_MS))) continue;
+    await removeSession(db, s);
+    removed++;
+  }
+  return removed;
+}
+
 // ---------------------------------------------------------------------------
 
 export async function handle(req, { db, now = Date.now } = {}) {
@@ -60,7 +117,6 @@ export async function handle(req, { db, now = Date.now } = {}) {
   const t = now();
 
   const getSession = (sid) => db.sessions.get(`sess/${sid}`, { type: 'json' });
-  const uniqueCount = async (sid) => (await db.checkins.list({ prefix: `${sid}/n/` })).blobs.length;
 
   // ---- student endpoint ---------------------------------------------------
 
@@ -79,11 +135,13 @@ export async function handle(req, { db, now = Date.now } = {}) {
     if (dot < 1 || !/^[A-Za-z0-9-]{1,40}$/.test(sid)) return fail(410, 'wrong_session');
     const session = await getSession(sid);
     if (!session) return fail(410, 'wrong_session');
-    if (session.endedAt) return fail(410, 'ended');
+    if (session.endedAt || isStale(session, t)) return fail(410, 'ended');
     const win = Math.floor(t / WINDOW_MS);
-    if (!tokenOk(token, tokenFor(session.secret, win)) && !tokenOk(token, tokenFor(session.secret, win - 1))) {
-      return fail(410, 'expired');
-    }
+    // The current code is valid. The previous one is honoured only for a short grace period after a
+    // rotation (a scan that was in flight), so a code is good for 5 s plus GRACE_MS, not 10 s.
+    const current = tokenOk(token, tokenFor(session.secret, win));
+    const justRotated = tokenOk(token, tokenFor(session.secret, win - 1)) && t % WINDOW_MS < GRACE_MS;
+    if (!current && !justRotated) return fail(410, 'expired');
 
     // Every check-in is kept, with its own photo. A second check-in under the same name is flagged
     // (not blocked), so the host can compare the faces and decide.
@@ -105,7 +163,12 @@ export async function handle(req, { db, now = Date.now } = {}) {
   const activeSession = async () => {
     const a = await db.sessions.get(`active/${hostId}`, { type: 'json' });
     const s = a ? await getSession(a.id) : null;
-    return s && !s.endedAt ? s : null;
+    if (!s || s.endedAt) return null;
+    if (isStale(s, t)) { // left running from an earlier lecture: gone, so the next one starts clean
+      await removeSession(db, s);
+      return null;
+    }
+    return s;
   };
 
   if (action === 'start' && method === 'POST') {
@@ -116,7 +179,6 @@ export async function handle(req, { db, now = Date.now } = {}) {
     const id = `${new Date(t).toISOString().slice(0, 10)}-${randomBytes(5).toString('hex')}`;
     const session = { id, hostId, title, secret: randomBytes(24).toString('base64url'), startedAt: t, endedAt: null, count: 0 };
     await db.sessions.setJSON(`sess/${id}`, session);
-    await db.sessions.set(`h/${hostId}/${id}`, '1');
     await db.sessions.setJSON(`active/${hostId}`, { id });
     return json({ sessionId: id, startedAt: t });
   }
@@ -124,20 +186,12 @@ export async function handle(req, { db, now = Date.now } = {}) {
   if (action === 'state' && method === 'GET') {
     const session = await activeSession();
     if (!session) return json({ active: false });
-    const have = new Set((url.searchParams.get('have') ?? '').split(',').filter(Boolean));
-    const atPrefix = `${session.id}/at/`;
-    const [count, at] = await Promise.all([uniqueCount(session.id), db.checkins.list({ prefix: atPrefix })]);
-    const keys = at.blobs.map((b) => b.key).sort().slice(-LATEST).reverse();
-    const latest = (
-      await Promise.all(
-        keys.map(async (k) => {
-          const e = await db.checkins.get(k, { type: 'json' });
-          if (!e) return null;
-          const id = k.slice(atPrefix.length);
-          return { id, name: e.name, time: e.time, dup: !!e.dup, photo: have.has(id) ? undefined : e.photo };
-        }),
-      )
-    ).filter(Boolean);
+    // `after` is the newest check-in the host page already holds for session `s`: it gets only newer
+    // ones, so each photo travels once and the page ends up with every check-in (for an offline PDF).
+    const after = url.searchParams.get('s') === session.id ? url.searchParams.get('after') ?? '' : '';
+    const { count, at } = await listSession(db, session.id);
+    const newer = at.filter((id) => id > after);
+    const entries = await readEntries(db, session.id, newer.slice(0, REPORT_PAGE));
     const win = Math.floor(t / WINDOW_MS);
     return json({
       active: true,
@@ -145,7 +199,8 @@ export async function handle(req, { db, now = Date.now } = {}) {
       title: session.title,
       startedAt: session.startedAt,
       count,
-      latest,
+      entries,
+      more: newer.length > REPORT_PAGE,
       token: tokenFor(session.secret, win),
       msLeft: WINDOW_MS - (t % WINDOW_MS),
     });
@@ -154,152 +209,51 @@ export async function handle(req, { db, now = Date.now } = {}) {
   if (action === 'end' && method === 'POST') {
     const session = await activeSession();
     if (!session) return fail(409, 'no_session');
-    const done = { ...session, endedAt: t, count: await uniqueCount(session.id) };
+    const done = { ...session, endedAt: t, count: (await listSession(db, session.id)).count };
     await db.sessions.setJSON(`sess/${session.id}`, done);
     await db.sessions.delete(`active/${hostId}`);
     return json({ sessionId: done.id, title: done.title, startedAt: done.startedAt, endedAt: done.endedAt, count: done.count });
   }
 
-  if (action === 'sessions' && method === 'GET') {
-    const prefix = `h/${hostId}/`;
-    const { blobs } = await db.sessions.list({ prefix });
-    const ids = blobs.map((b) => b.key.slice(prefix.length)).sort().slice(-30);
-    const all = await Promise.all(ids.map(getSession));
-    const sessions = all
-      .filter((s) => s && s.endedAt)
-      .sort((a, b) => b.startedAt - a.startedAt)
-      .map(({ id, title, startedAt, endedAt, count }) => ({ id, title, startedAt, endedAt, count }));
-    return json({ sessions });
+  if (action === 'delete' && method === 'POST') {
+    // The host's browser has made the PDF: nothing about the session is kept any longer.
+    const body = await readJson(req);
+    const sid = String(body.sessionId ?? '');
+    if (!/^[A-Za-z0-9-]{1,40}$/.test(sid)) return fail(400, 'bad_session');
+    const session = await getSession(sid);
+    if (!session || session.hostId !== hostId) return fail(404, 'no_such_session');
+    if (!session.endedAt) return fail(409, 'not_ended');
+    await removeSession(db, session);
+    return json({ deleted: true });
   }
 
-  if (action === 'pdf' && method === 'GET') {
+  if (action === 'report' && method === 'GET') {
     const sid = url.searchParams.get('s') ?? '';
     if (!/^[A-Za-z0-9-]{1,40}$/.test(sid)) return fail(400, 'bad_session');
     const session = await getSession(sid);
     if (!session || session.hostId !== hostId) return fail(404, 'no_such_session'); // only the host who ran it
-    let tz = url.searchParams.get('tz') || 'UTC';
-    try {
-      new Intl.DateTimeFormat('en', { timeZone: tz });
-    } catch {
-      tz = 'UTC';
-    }
-    const prefix = `${sid}/at/`;
-    const { blobs } = await db.checkins.list({ prefix });
-    const entries = (
-      await Promise.all(blobs.map((b) => b.key).sort().map((k) => db.checkins.get(k, { type: 'json' })))
-    ).filter(Boolean);
-    const count = await uniqueCount(sid);
-
-    const date = (ms) => new Date(ms).toLocaleString('sv-SE', { timeZone: tz });
-    const day = new Date(session.startedAt).toLocaleDateString('sv-SE', { timeZone: tz });
-    const slug = (session.title || '').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30);
-    const pdf = await buildPdf({
-      title: session.title || 'Attendance',
-      subtitle: `${date(session.startedAt)} (${tz})  ·  ${count} checked in`,
+    const after = url.searchParams.get('after') ?? '';
+    const { count, at } = await listSession(db, sid);
+    const ids = at.filter((id) => id > after);
+    const pageIds = ids.slice(0, REPORT_PAGE);
+    const entries = await readEntries(db, sid, pageIds);
+    return json({
+      title: session.title,
+      startedAt: session.startedAt,
+      endedAt: session.endedAt,
+      count,
       entries,
-      time: (ms) => new Date(ms).toLocaleTimeString('sv-SE', { timeZone: tz }),
-    });
-    return new Response(pdf, {
-      status: 200,
-      headers: {
-        'content-type': 'application/pdf',
-        'content-disposition': `attachment; filename="attendance-${day}${slug ? '-' + slug : ''}.pdf"`,
-        'cache-control': 'no-store',
-      },
+      next: ids.length > REPORT_PAGE ? pageIds[pageIds.length - 1] : null,
     });
   }
 
   return fail(404, 'not_found');
 }
 
-// ---- PDF report -------------------------------------------------------------
-// A4, two columns of cards: photo, name, time. Latin, Cyrillic and Greek names render;
-// other scripts show as "?".
-
-async function buildPdf({ title, subtitle, entries, time }) {
-  const pdf = await PDFDocument.create();
-  pdf.registerFontkit(fontkit);
-  const font = await pdf.embedFont(Buffer.from(REGULAR, 'base64'), { subset: true });
-  const bold = await pdf.embedFont(Buffer.from(BOLD, 'base64'), { subset: true });
-  const known = new Set(font.getCharacterSet());
-  const safe = (s) => [...String(s)].map((ch) => (known.has(ch.codePointAt(0)) ? ch : '?')).join('');
-  const fit = (text, f, size, maxW) => {
-    let s = safe(text);
-    if (f.widthOfTextAtSize(s, size) <= maxW) return s;
-    while (s.length > 1 && f.widthOfTextAtSize(s + '…', size) > maxW) s = s.slice(0, -1);
-    return s + '…';
-  };
-
-  const W = 595.28;
-  const H = 841.89;
-  const M = 40;
-  const GAP = 20;
-  const COL_W = (W - 2 * M - GAP) / 2;
-  const CELL_H = 60;
-  const PHOTO = 48;
-  const ink = rgb(0.059, 0.09, 0.165);
-  const muted = rgb(0.357, 0.392, 0.459);
-  const rule = rgb(0.875, 0.89, 0.925);
-  const warn = rgb(0.71, 0.27, 0.07);
-
-  const pages = [];
-  const newPage = () => {
-    const page = pdf.addPage([W, H]);
-    pages.push(page);
-    let top = H - M;
-    if (pages.length === 1) {
-      page.drawText(fit(title, bold, 22, W - 2 * M), { x: M, y: top - 22, size: 22, font: bold, color: ink });
-      page.drawText(safe(subtitle), { x: M, y: top - 44, size: 11, font, color: muted });
-      top -= 62;
-    } else {
-      page.drawText(fit(title, font, 10, W - 2 * M), { x: M, y: top - 10, size: 10, font, color: muted });
-      top -= 22;
-    }
-    page.drawLine({ start: { x: M, y: top }, end: { x: W - M, y: top }, thickness: 1, color: rule });
-    return { page, y: top - 14 };
-  };
-
-  // Flag every check-in that shares a name with another one, so both faces can be compared.
-  const seen = new Map();
-  for (const e of entries) seen.set(nameKey(e.name), (seen.get(nameKey(e.name)) ?? 0) + 1);
-
-  let { page, y } = newPage();
-  for (let i = 0; i < entries.length; i++) {
-    const col = i % 2;
-    if (col === 0 && i > 0) y -= CELL_H;
-    if (y - CELL_H < M + 24) ({ page, y } = newPage());
-    const e = entries[i];
-    const x = M + col * (COL_W + GAP);
-    const bottom = y - PHOTO;
-
-    page.drawText(String(i + 1), { x, y: bottom + PHOTO / 2 - 4, size: 9, font, color: muted });
-    try {
-      const bytes = Buffer.from(e.photo.split(',')[1] ?? '', 'base64');
-      const img = await pdf.embedJpg(bytes);
-      page.drawImage(img, { x: x + 24, y: bottom, width: PHOTO, height: PHOTO });
-    } catch {
-      page.drawRectangle({ x: x + 24, y: bottom, width: PHOTO, height: PHOTO, color: rule });
-    }
-    const tx = x + 24 + PHOTO + 10;
-    const maxW = COL_W - 24 - PHOTO - 10;
-    page.drawText(fit(e.name, bold, 12.5, maxW), { x: tx, y: bottom + PHOTO - 14, size: 12.5, font: bold, color: ink });
-    page.drawText(time(e.time), { x: tx, y: bottom + PHOTO - 30, size: 10.5, font, color: muted });
-    if (seen.get(nameKey(e.name)) > 1) {
-      page.drawText('Same name used more than once', { x: tx, y: bottom + PHOTO - 43, size: 8, font: bold, color: warn });
-    }
-  }
-
-  pages.forEach((p, n) => {
-    p.drawText(`Page ${n + 1} of ${pages.length}`, { x: W - M - 60, y: M - 12, size: 8.5, font, color: muted });
-  });
-  pdf.setTitle(safe(title));
-  return pdf.save();
-}
-
 // ---------------------------------------------------------------------------
 
 let realDb;
-async function realStores() {
+export async function realStores() {
   if (realDb) return realDb;
   const { getStore } = await import('@netlify/blobs');
   const open = (name) => getStore({ name, consistency: 'strong' });

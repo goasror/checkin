@@ -12,6 +12,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 <script src="vendor/qrcode.js" defer></script>
+<script src="report.js" defer></script>
 <script src="host.js" defer></script>
 </head>
 <body class="host-body">
@@ -23,11 +24,12 @@
     <h1 class="title" id="liveTitle">Scan to check in</h1>
     <span class="live-pill" id="livePill"><i></i><span id="liveText">Live</span></span>
   </header>
+  <p class="live-since" id="liveSince"></p>
   <div class="live-grid">
     <section class="qr-card" aria-label="Check-in code">
       <div class="qr-box"><svg id="qr" role="img" aria-label="Rotating check-in QR code" viewBox="0 0 10 10" shape-rendering="crispEdges"><path id="qrPath" fill="#0f172a" d=""/></svg></div>
       <div class="drain-track"><div id="drain"></div></div>
-      <p class="cap">New code every 10 seconds</p>
+      <p class="cap">New code every 5 seconds</p>
       <p class="join">First time? Open <strong id="joinUrl"></strong></p>
     </section>
     <section class="live-side">
@@ -41,6 +43,10 @@
           <span id="endLabel">End &amp; download</span>
         </button>
       </div>
+      <div class="offline" id="offline" role="alert" hidden>
+        <p>Connection lost. The code on screen has stopped changing, so students cannot check in until it is back. Check-ins so far are safe on this page.</p>
+        <button class="btn-outline wide" id="offlineSave" type="button">Save PDF of check-ins so far</button>
+      </div>
       <h2 class="latest-h">Latest</h2>
       <ul class="latest" id="latest"></ul>
       <p class="empty" id="latestEmpty">Nobody has checked in yet.</p>
@@ -48,7 +54,7 @@
   </div>
 </main>
 
-<!-- no session running: start one, or download earlier ones -->
+<!-- no session running: start one, or download the one that just ended -->
 <main class="screen host" data-screen="home" hidden>
   <div id="endedBlock" hidden>
     <div class="ended-circle"><svg aria-hidden="true" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#067a55" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
@@ -59,6 +65,7 @@
       <span>Download PDF report</span>
     </button>
     <div class="file-hint">Photo, name and time for everyone who checked in</div>
+    <button class="btn-outline wide" id="newSession" type="button">Start another session</button>
   </div>
 
   <div id="startBlock">
@@ -72,13 +79,9 @@
   </div>
   <p class="err" id="homeErr" role="alert"></p>
 
-  <h2 class="section-h">Your earlier sessions</h2>
-  <div class="list" id="past"></div>
-  <p class="empty" id="pastEmpty" hidden>No finished sessions yet.</p>
-
   <details class="admin">
     <summary>Use this on another device</summary>
-    <p>Your sessions belong to this browser. Open this link on another device to manage them there too. Anyone who has the link can download your attendance files, so keep it to yourself.</p>
+    <p>Your sessions belong to this browser. Open this link on another device to run lectures from there too. Anyone who has the link can run sessions and download reports as you, so keep it to yourself.</p>
     <form id="linkForm">
       <input type="text" id="linkBox" readonly aria-label="Link for another device" style="font-size:13px">
       <button class="btn-outline" type="submit">Copy</button>
